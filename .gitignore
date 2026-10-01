@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# ローカル設定（接続先・履歴など）
+settings.json
+
+# PyInstaller / ビルド成果物
+build/
+build_new/
+dist/
+dist_new/
+*.spec
+
+# 一時・作業
+新しいフォルダー/
+Everything-*/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 旧すぐサーチ（開発停止版）の退避
+oldfile/
+
+# 個人設定・リリース作業ファイル
+.claude/
+script/release-msg.txt
