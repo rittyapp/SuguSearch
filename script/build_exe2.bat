@@ -11,7 +11,7 @@ echo.
 REM 起動中の EXE があると上書きできない
 taskkill /F /IM SuguSearch.exe >nul 2>&1
 
-echo [1/3] アイコン生成...
+echo [1/4] アイコン生成...
 py -3 "%ROOT%\script\build_icon.py"
 if errorlevel 1 (
   echo ERROR: build_icon.py に失敗しました
@@ -22,7 +22,7 @@ if not exist "%ROOT%\assets\sugusearch.ico" (
   goto :error
 )
 
-echo [2/3] PyInstaller で EXE 作成...
+echo [2/4] PyInstaller で EXE 作成...
 REM --specpath を使うため、--icon / --add-data は絶対パスで渡す
 py -3 -m PyInstaller --noconfirm --clean --windowed --onefile --name SuguSearch --icon "%ROOT%\assets\sugusearch.ico" --add-data "%ROOT%\assets\sugusearch.ico;." --add-data "%ROOT%\version.txt;." --hidden-import win32timezone --hidden-import app_paths --hidden-import self_update --distpath "%ROOT%\dist" --workpath "%ROOT%\build" --specpath "%ROOT%\build" "%ROOT%\src\sugusearch.py"
 if errorlevel 1 (
@@ -37,7 +37,7 @@ if not exist "%ROOT%\dist\SuguSearch.exe" (
   goto :error
 )
 
-echo [3/3] README / version.txt を dist へ...
+echo [3/4] README / version.txt を dist へ...
 copy /Y "%ROOT%\README.MD" "%ROOT%\dist\README.MD" >nul
 if exist "%ROOT%\version.txt" (
   copy /Y "%ROOT%\version.txt" "%ROOT%\dist\version.txt" >nul
@@ -45,11 +45,28 @@ if exist "%ROOT%\version.txt" (
   echo 1.0.0> "%ROOT%\dist\version.txt"
 )
 
+echo [4/4] 配布用 zip を作成...
+set /p VER=<"%ROOT%\version.txt"
+set "PKG=%ROOT%\dist\SuguSearch-Setup"
+set "ZIP=%ROOT%\dist\SuguSearch-Setup-%VER%.zip"
+if exist "%PKG%" rmdir /s /q "%PKG%"
+if exist "%ZIP%" del /f /q "%ZIP%"
+mkdir "%PKG%"
+copy /Y "%ROOT%\dist\SuguSearch.exe" "%PKG%\" >nul
+copy /Y "%ROOT%\script\setup.bat" "%PKG%\" >nul
+copy /Y "%ROOT%\script\setup.ps1" "%PKG%\" >nul
+powershell -NoProfile -Command "Compress-Archive -LiteralPath '%PKG%' -DestinationPath '%ZIP%' -Force"
+if not exist "%ZIP%" (
+  echo ERROR: 配布用 zip を作れませんでした
+  goto :error
+)
+
 echo.
 echo ==============================
 echo  BUILD OK
 echo  %ROOT%\dist\SuguSearch.exe
-echo  Next: script\setup.bat
+echo  %ZIP%
+echo  （配布: zip を展開して setup.bat を実行）
 echo ==============================
 echo.
 pause

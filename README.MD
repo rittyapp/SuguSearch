@@ -37,18 +37,21 @@ Everything 本体: https://www.voidtools.com/
 
 ### 利用者向け
 
-1. 配布された **セットアップ** を一度実行（デスクトップにショートカットが付く）
-2. ショートカットから起動
+1. 配布された **`SuguSearch-Setup-<版>.zip`** を展開し、中の **`setup.bat`** をダブルクリック（デスクトップに「すぐサーチ」が付く）
+2. デスクトップの「すぐサーチ」から起動
 3. 新しい版があるときはアプリ内 **「更新」タブ** →「更新を確認」→「ダウンロードして更新」
+
+旧 Everysearch を使っていた場合、接続先などの設定はセットアップ時に自動で引き継がれます。すぐサーチが起動できたら、Everysearch のショートカットと `%LocalAppData%\Everysearch` を削除してください。
 
 利用者は GitHub やトークンを意識する必要はありません。
 
 ### 開発者向け
 
-1. **ビルド**: `script\build_exe2.bat`
+1. **ビルド**: `script\build_exe2.bat` → `dist\SuguSearch.exe` と配布用 `dist\SuguSearch-Setup-<版>.zip`（exe・setup.bat・setup.ps1）
 2. **セットアップ試験**: `script\setup.bat` → `%LocalAppData%\SuguSearch\`
-3. **配布**: 公開 Release に `SuguSearch.exe` を添付（更新タブがここを見に行く。UI には出さない）
-4. **開発起動**: `script\起動.bat` または `py src\sugusearch.py`
+3. **リリース**: `script\release.bat`（ビルド → push → 公開 Release に exe と zip を添付。更新タブは exe を見に行く）
+4. 版数は `src\app_paths.py` の `APP_VERSION` と `version.txt` を揃える（配布物に version.txt は不要）
+5. **開発起動**: `script\起動.bat` または `py src\sugusearch.py`
 
 ## かんたんな使い方
 

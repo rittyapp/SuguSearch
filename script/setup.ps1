@@ -1,18 +1,20 @@
-﻿# SuguSearch (すぐサーチ) setup — any Windows (no Python required after install)
-# Save as UTF-8 with BOM. Called from setup.bat.
+﻿# SuguSearch (すぐサーチ) setup — any Windows (no Python required)
+# UTF-8 with BOM. Called from setup.bat.
+# Works in two layouts:
+#   配布 zip : setup.bat / setup.ps1 / SuguSearch.exe が同じフォルダ
+#   開発     : script\setup.ps1 と dist\SuguSearch.exe
+# 版数は EXE 内蔵（APP_VERSION）を正とするので version.txt は使わない。
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Root = Split-Path -Parent $ScriptDir
-$VersionFile = Join-Path $Root "version.txt"
-$Version = "1.2.0"
-if (Test-Path -LiteralPath $VersionFile) {
-    $Version = (Get-Content -LiteralPath $VersionFile -TotalCount 1).Trim()
-}
+$DevRoot = Split-Path -Parent $ScriptDir
 
-$ExeSrc = Join-Path $Root "dist\SuguSearch.exe"
-if (-not (Test-Path -LiteralPath $ExeSrc)) {
-    throw "dist\SuguSearch.exe not found. Run script\build_exe2.bat first."
+$ExeSrc = $null
+foreach ($cand in @((Join-Path $ScriptDir "SuguSearch.exe"), (Join-Path $DevRoot "dist\SuguSearch.exe"))) {
+    if (Test-Path -LiteralPath $cand) { $ExeSrc = $cand; break }
+}
+if (-not $ExeSrc) {
+    throw "SuguSearch.exe が見つかりません。zip を展開してから setup.bat を実行してください。"
 }
 
 $InstallRoot = Join-Path $env:LOCALAPPDATA "SuguSearch"
@@ -22,71 +24,61 @@ $Previous = Join-Path $InstallRoot "previous"
 $Staging = Join-Path $InstallRoot "staging"
 
 Write-Host ""
-Write-Host "=== すぐサーチ setup ==="
-Write-Host "version: $Version"
-Write-Host "from   : $ExeSrc"
-Write-Host "to     : $Current"
+Write-Host "=== すぐサーチ セットアップ ==="
+Write-Host "from : $ExeSrc"
+Write-Host "to   : $Current"
 Write-Host ""
 
 New-Item -ItemType Directory -Force -Path $Current, $Data, $Previous, $Staging | Out-Null
-
-# Keep previous if upgrading via setup
 $DestExe = Join-Path $Current "SuguSearch.exe"
-if (Test-Path -LiteralPath $DestExe) {
-    $Bak = Join-Path $Previous "SuguSearch.exe"
-    Copy-Item -LiteralPath $DestExe -Destination $Bak -Force
-    $PrevVer = Join-Path $Current "version.txt"
-    if (Test-Path -LiteralPath $PrevVer) {
-        Copy-Item -LiteralPath $PrevVer -Destination (Join-Path $Previous "version.txt") -Force
-    }
+
+# 起動中なら終了してもらう（上書きできないため）
+$running = Get-Process -Name "SuguSearch" -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host "すぐサーチを終了します..."
+    $running | Stop-Process -Force
+    Start-Sleep -Seconds 1
 }
 
+# 上書き前の EXE を previous に残す
+if (Test-Path -LiteralPath $DestExe) {
+    Copy-Item -LiteralPath $DestExe -Destination (Join-Path $Previous "SuguSearch.exe") -Force
+}
 Copy-Item -LiteralPath $ExeSrc -Destination $DestExe -Force
-Set-Content -LiteralPath (Join-Path $Current "version.txt") -Value $Version -Encoding ASCII
+# 古い version.txt が残っていると EXE 内蔵の版より優先されるので消す
+$OldVer = Join-Path $Current "version.txt"
+if (Test-Path -LiteralPath $OldVer) { Remove-Item -LiteralPath $OldVer -Force }
 
-# Migrate settings from next-to-exe / src if data empty
+# 設定の引き継ぎ（data が空のときだけ）: 旧 Everysearch → 開発用の設定
 $DataSettings = Join-Path $Data "settings.json"
 if (-not (Test-Path -LiteralPath $DataSettings)) {
     foreach ($cand in @(
         (Join-Path $env:LOCALAPPDATA "Everysearch\data\settings.json"),
-        (Join-Path $Root "dist\settings.json"),
-        (Join-Path $Root "src\settings.json"),
-        (Join-Path $Root "settings.json")
+        (Join-Path $DevRoot "dist\settings.json"),
+        (Join-Path $DevRoot "src\settings.json")
     )) {
         if (Test-Path -LiteralPath $cand) {
             Copy-Item -LiteralPath $cand -Destination $DataSettings -Force
-            Write-Host "settings migrated: $cand"
+            Write-Host "設定を引き継ぎました: $cand"
             break
         }
     }
 }
 
-# Desktop shortcut -> current\SuguSearch.exe
-$Desktop = [Environment]::GetFolderPath("Desktop")
-$LnkPath = Join-Path $Desktop "すぐサーチ.lnk"
+# ショートカット（アイコンは EXE に埋め込んだもの）
 $Wsh = New-Object -ComObject WScript.Shell
-$Sc = $Wsh.CreateShortcut($LnkPath)
-$Sc.TargetPath = $DestExe
-$Sc.WorkingDirectory = $Current
-$Sc.Description = "すぐサーチ $Version"
-$Ico = Join-Path $Root "assets\sugusearch.ico"
-if (Test-Path -LiteralPath $Ico) {
-    $Sc.IconLocation = "$Ico,0"
-}
-$Sc.Save()
-
-# Start Menu
+$Desktop = [Environment]::GetFolderPath("Desktop")
 $StartDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 New-Item -ItemType Directory -Force -Path $StartDir | Out-Null
-$StartLnk = Join-Path $StartDir "すぐサーチ.lnk"
-$Sc2 = $Wsh.CreateShortcut($StartLnk)
-$Sc2.TargetPath = $DestExe
-$Sc2.WorkingDirectory = $Current
-$Sc2.Description = "すぐサーチ $Version"
-if (Test-Path -LiteralPath $Ico) { $Sc2.IconLocation = "$Ico,0" }
-$Sc2.Save()
+foreach ($lnk in @((Join-Path $Desktop "すぐサーチ.lnk"), (Join-Path $StartDir "すぐサーチ.lnk"))) {
+    $Sc = $Wsh.CreateShortcut($lnk)
+    $Sc.TargetPath = $DestExe
+    $Sc.WorkingDirectory = $Current
+    $Sc.Description = "すぐサーチ"
+    $Sc.IconLocation = "$DestExe,0"
+    $Sc.Save()
+}
 
 Write-Host "OK"
-Write-Host "shortcut: $LnkPath"
-Write-Host "exe     : $DestExe"
+Write-Host "デスクトップの「すぐサーチ」から起動してください。"
 Write-Host ""

@@ -1,5 +1,6 @@
 ﻿# SuguSearch (すぐサーチ) release
-#   build -> (create GitHub repo / git init if needed) -> commit -> push -> GitHub Release (+ SuguSearch.exe, version.txt)
+#   build -> (create GitHub repo / git init if needed) -> commit -> push -> GitHub Release (+ SuguSearch.exe, SuguSearch-Setup-<ver>.zip)
+#   同じ版を再実行すると、その版のリリースとタグを作り直す
 # UTF-8 with BOM. Called from release.bat.
 # Log: %TEMP%\sugusearch-release.log (copied to script\release.log at the end; Dropbox locks files in place)
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,8 @@ try {
     if (-not (Test-Path -LiteralPath $Exe)) { throw "dist\SuguSearch.exe がありません" }
     if ((Get-Item -LiteralPath $Exe).LastWriteTime -lt (Get-Date).AddMinutes(-15)) { throw "EXE が更新されていません（ビルド失敗の可能性）" }
     if ((Get-Content -LiteralPath $DistVer -TotalCount 1).Trim() -ne $Version) { throw "dist\version.txt が $Version ではありません" }
+    $Zip = Join-Path $Root "dist\SuguSearch-Setup-$Version.zip"
+    if (-not (Test-Path -LiteralPath $Zip)) { throw "配布用 zip がありません: $Zip" }
     L ("  OK {0:N0} bytes" -f (Get-Item -LiteralPath $Exe).Length)
 
     # 2) token from git credential manager
@@ -84,12 +87,19 @@ try {
     L "[5/5] release $Tag"
     $NotesFile = Join-Path $ScriptDir "release-notes.md"
     $Notes = if (Test-Path -LiteralPath $NotesFile) { [IO.File]::ReadAllText($NotesFile, [Text.Encoding]::UTF8) } else { "" }
+    # 同じ版を出し直す場合は、旧リリースとタグを消して最新コミットで作り直す
+    $old = $null
+    try { $old = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag" -Headers $H -Method Get } catch { }
+    if ($old) {
+        Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/$($old.id)" -Headers $H -Method Delete | Out-Null
+        L "  旧 $Tag リリースを削除"
+    }
+    try { Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/git/refs/tags/$Tag" -Headers $H -Method Delete | Out-Null; L "  旧 $Tag タグを削除" } catch { }
     $rel = $null
-    try { $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag" -Headers $H -Method Get; L "  既存リリースを使用" } catch { }
     if (-not $rel) {
         $rel = PostJson "https://api.github.com/repos/$Repo/releases" @{ tag_name = $Tag; target_commitish = "main"; name = "すぐサーチ $Version"; body = [string]$Notes; draft = $false; prerelease = $false }
     }
-    foreach ($f in @($Exe, $DistVer)) {
+    foreach ($f in @($Exe, $Zip)) {
         $name = Split-Path -Leaf $f
         foreach ($a in @($rel.assets)) { if ($a -and $a.name -eq $name) { Invoke-RestMethod -Uri $a.url -Headers $H -Method Delete | Out-Null } }
         $up = "https://uploads.github.com/repos/$Repo/releases/$($rel.id)/assets?name=$name"

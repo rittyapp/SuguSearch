@@ -3,20 +3,14 @@ chcp 932 >nul
 setlocal
 cd /d "%~dp0"
 echo.
-echo === SuguSearch setup ===
-if not exist "%~dp0..\dist\SuguSearch.exe" (
-  echo ERROR: dist\SuguSearch.exe missing
-  echo Run build_exe2.bat first.
-  pause
-  exit /b 1
-)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1"
 set EC=%ERRORLEVEL%
+chcp 932 >nul
 echo.
 if %EC% neq 0 (
-  echo SETUP FAILED %EC%
+  echo セットアップに失敗しました（%EC%）。上のメッセージを確認してください。
 ) else (
-  echo SETUP OK - use Desktop shortcut
+  echo セットアップが完了しました。
 )
 pause
 exit /b %EC%
