@@ -1,7 +1,7 @@
 ﻿# SuguSearch (すぐサーチ) setup — any Windows (no Python required)
 # UTF-8 with BOM. Called from setup.bat.
 # Works in two layouts:
-#   配布 zip : setup.bat / setup.ps1 / SuguSearch.exe が同じフォルダ
+#   配布 zip : setup.bat（これだけをダブルクリック）と files\{setup.ps1, SuguSearch.exe}
 #   開発     : script\setup.ps1 と dist\SuguSearch.exe
 # 版数は EXE 内蔵（APP_VERSION）を正とするので version.txt は使わない。
 
@@ -14,7 +14,7 @@ foreach ($cand in @((Join-Path $ScriptDir "SuguSearch.exe"), (Join-Path $DevRoot
     if (Test-Path -LiteralPath $cand) { $ExeSrc = $cand; break }
 }
 if (-not $ExeSrc) {
-    throw "SuguSearch.exe が見つかりません。zip を展開してから setup.bat を実行してください。"
+    throw "SuguSearch.exe が見つかりません。zip を展開してから、中の setup.bat をダブルクリックしてください。"
 }
 
 $InstallRoot = Join-Path $env:LOCALAPPDATA "SuguSearch"

@@ -51,10 +51,11 @@ set "PKG=%ROOT%\dist\SuguSearch-Setup"
 set "ZIP=%ROOT%\dist\SuguSearch-Setup-%VER%.zip"
 if exist "%PKG%" rmdir /s /q "%PKG%"
 if exist "%ZIP%" del /f /q "%ZIP%"
-mkdir "%PKG%"
-copy /Y "%ROOT%\dist\SuguSearch.exe" "%PKG%\" >nul
+REM 利用者に見せるのは setup.bat だけ。中身は files\ に入れる
+mkdir "%PKG%\files"
 copy /Y "%ROOT%\script\setup.bat" "%PKG%\" >nul
-copy /Y "%ROOT%\script\setup.ps1" "%PKG%\" >nul
+copy /Y "%ROOT%\dist\SuguSearch.exe" "%PKG%\files\" >nul
+copy /Y "%ROOT%\script\setup.ps1" "%PKG%\files\" >nul
 powershell -NoProfile -Command "Compress-Archive -LiteralPath '%PKG%' -DestinationPath '%ZIP%' -Force"
 if not exist "%ZIP%" (
   echo ERROR: 配布用 zip を作れませんでした
@@ -66,7 +67,7 @@ echo ==============================
 echo  BUILD OK
 echo  %ROOT%\dist\SuguSearch.exe
 echo  %ZIP%
-echo  （配布: zip を展開して setup.bat を実行）
+echo  （配布: zip を展開して setup.bat をダブルクリック）
 echo ==============================
 echo.
 pause
