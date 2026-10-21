@@ -42,12 +42,12 @@ copy /Y "%ROOT%\README.MD" "%ROOT%\dist\README.MD" >nul
 if exist "%ROOT%\version.txt" (
   copy /Y "%ROOT%\version.txt" "%ROOT%\dist\version.txt" >nul
 ) else (
-  echo 1.0.6> "%ROOT%\dist\version.txt"
+  echo 1.0.7> "%ROOT%\dist\version.txt"
 )
 
 echo [4/4] ”z•z—p zip ‚ğì¬...
 set /p VER=<"%ROOT%\version.txt"
-set "PKG=%ROOT%\dist\SuguSearch-Setup"
+set "PKG=%ROOT%\build\pkg\SuguSearch-Setup"
 set "ZIP=%ROOT%\dist\SuguSearch-Setup-%VER%.zip"
 if exist "%PKG%" rmdir /s /q "%PKG%"
 if exist "%ZIP%" del /f /q "%ZIP%"
