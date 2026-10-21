@@ -7,7 +7,7 @@
 - 旧 **Everysearch を「すぐサーチ」に改名**して本リポジトリ `rittyapp/SuguSearch`（公開）で 1.0.0 から開始。
 - 旧 Everysearch リポジトリは 1.3.2 で終了。旧すぐサーチ（別実装）は `oldfile/`（git 管理外）。
 - 名前の使い分け: 画面・ショートカット・Release 名は「すぐサーチ」、EXE は `SuguSearch.exe`、配置は `%LOCALAPPDATA%\SuguSearch\`（日本語の EXE 名は更新 bat が ASCII 前提なので使わない）。
-- 自己更新あり（`src/self_update.py`）。参照先は `rittyapp/SuguSearch` の Releases、asset は `SuguSearch.exe` と `version.txt`。
+- 自己更新あり（`src/self_update.py`）。参照先は `rittyapp/SuguSearch` の Releases、asset は `SuguSearch-<版>.exe` と `SuguSearch-Setup-<版>.zip`（exe を `SuguSearch.exe` という名前で添付すると 1.0.3 以前の更新処理が SameFileError で失敗するので、必ず版付きの名前にする。`release.ps1` がそうしている）。
 - 旧 Everysearch の設定は初回だけ引き継ぐ（`app_paths.legacy_settings_path()`、`setup.ps1`）。
 - ロードマップは `doc/roadmap.md`。
 

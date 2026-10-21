@@ -1,5 +1,5 @@
 ﻿# SuguSearch (すぐサーチ) release
-#   build -> (create GitHub repo / git init if needed) -> commit -> push -> GitHub Release (+ SuguSearch.exe, SuguSearch-Setup-<ver>.zip)
+#   build -> (create GitHub repo / git init if needed) -> commit -> push -> GitHub Release (+ SuguSearch-<ver>.exe, SuguSearch-Setup-<ver>.zip)
 #   同じ版を再実行すると、その版のリリースとタグを作り直す
 # UTF-8 with BOM. Called from release.bat.
 # Log: %TEMP%\sugusearch-release.log (copied to script\release.log at the end; Dropbox locks files in place)
@@ -99,7 +99,12 @@ try {
     if (-not $rel) {
         $rel = PostJson "https://api.github.com/repos/$Repo/releases" @{ tag_name = $Tag; target_commitish = "main"; name = "すぐサーチ $Version"; body = [string]$Notes; draft = $false; prerelease = $false }
     }
-    foreach ($f in @($Exe, $Zip)) {
+    # exe は版付きの名前で添付する（SuguSearch-<版>.exe）。
+    # 1.0.3 以前の更新処理は asset 名が SuguSearch.exe だと同じファイルへのコピーで失敗するため、
+    # 別名にしておけば古い版からでも更新できる。
+    $ExeAsset = Join-Path $Root "dist\SuguSearch-$Version.exe"
+    Copy-Item -LiteralPath $Exe -Destination $ExeAsset -Force
+    foreach ($f in @($ExeAsset, $Zip)) {
         $name = Split-Path -Leaf $f
         foreach ($a in @($rel.assets)) { if ($a -and $a.name -eq $name) { Invoke-RestMethod -Uri $a.url -Headers $H -Method Delete | Out-Null } }
         $up = "https://uploads.github.com/repos/$Repo/releases/$($rel.id)/assets?name=$name"

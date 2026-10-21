@@ -52,7 +52,7 @@ Everything 本体: https://www.voidtools.com/
 
 1. **ビルド**: `script\build_exe2.bat` → `dist\SuguSearch.exe` と配布用 `dist\SuguSearch-Setup-<版>.zip`（`setup.bat` と `files\`{exe, setup.ps1}）
 2. **セットアップ試験**: `script\setup.bat` → `%LocalAppData%\SuguSearch\`
-3. **リリース**: `script\release.bat`（ビルド → push → 公開 Release に exe と zip を添付。更新タブは exe を見に行く）
+3. **リリース**: `script\release.bat`（ビルド → push → 公開 Release に `SuguSearch-<版>.exe` と zip を添付。更新タブは exe を見に行く）
 4. 版数は `src\app_paths.py` の `APP_VERSION` と `version.txt` を揃える（配布物に version.txt は不要）
 5. **開発起動**: `script\起動.bat` または `py src\sugusearch.py`
 6. 版数のルール（パッチを +1 など）は `CLAUDE.md` の「バージョン番号のルール」

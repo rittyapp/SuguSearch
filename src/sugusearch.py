@@ -2869,14 +2869,32 @@ class EverythingSearchApp:
 
             def done():
                 if err:
+                    detail = f"{type(err).__name__}: {err}"
+                    net = isinstance(err, (URLError, TimeoutError, ConnectionError))
+                    try:
+                        log = SETTINGS_PATH.parent / "update_error.log"
+                        import traceback
+
+                        log.write_text(
+                            dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            + f"  {rel.tag} {rel.asset_name}\n"
+                            + "".join(traceback.format_exception(err)),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        log = None
                     self.update_status_var.set(
-                        "ダウンロードまたは更新の準備に失敗しました。ネット接続を確認してください。"
+                        "ダウンロードに失敗しました。ネット接続を確認してください。"
+                        if net
+                        else "更新の準備に失敗しました（詳細はエラー表示を参照）。"
                     )
                     self.update_apply_btn.set_enabled(True)
                     messagebox.showerror(
                         "更新",
                         "更新できませんでした。\n"
-                        "ネット接続を確認し、もう一度お試しください。",
+                        + ("ネット接続を確認し、もう一度お試しください。\n" if net else "")
+                        + f"\n詳細: {detail}"
+                        + (f"\n記録: {log}" if log else ""),
                     )
                     return
                 self.update_status_var.set(msg)

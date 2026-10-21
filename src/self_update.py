@@ -144,7 +144,10 @@ def prepare_staging_exe(asset_path: Path, staging_dir: Path) -> Path:
     staging_dir.mkdir(parents=True, exist_ok=True)
     target = staging_dir / "SuguSearch.exe"
     if asset_path.suffix.lower() == ".exe":
-        shutil.copy2(asset_path, target)
+        # 1.0.3 までは asset 名が SuguSearch.exe だと「同じファイルへのコピー」になり
+        # SameFileError で更新が必ず失敗していた。同じなら何もしない。
+        if asset_path.resolve() != target.resolve():
+            shutil.copy2(asset_path, target)
         return target
 
     if asset_path.suffix.lower() == ".zip":
@@ -228,7 +231,8 @@ def apply_update_and_restart(
         except OSError:
             pass
 
-    tmp = staging / release.asset_name
+    # ダウンロード先は展開後の SuguSearch.exe と名前がぶつからないようにする
+    tmp = staging / f"download_{release.asset_name}"
     download_file(release.asset_url, tmp, token=token)
     prepare_staging_exe(tmp, staging)
     write_version_file(staging / "version.txt", release.version)

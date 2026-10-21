@@ -56,7 +56,7 @@
   update_runner.bat  … 差し替え用（本体終了後に実行）
 ```
 
-GitHub: `https://github.com/rittyapp/SuguSearch` の **Releases** に `SuguSearch.exe` または zip を添付する運用。
+GitHub: `https://github.com/rittyapp/SuguSearch` の **Releases** に `SuguSearch-<版>.exe` と zip を添付する運用（exe を `SuguSearch.exe` の名前で添付すると 1.0.3 以前の更新処理が失敗するため版付きにする）。
 
 ---
 
@@ -88,6 +88,7 @@ GitHub: `https://github.com/rittyapp/SuguSearch` の **Releases** に `SuguSearc
 | H | フィルタで絞っても取得上限に押し出されて結果が出ない | **修正済（1.0.2）** | 種類・パス条件のチップ条件を Everything の検索式に含めてサーバー側で絞る | — |
 | I | 対象フォルダ欄の手入力・貼り付けで再検索されない | **修正済（1.0.2）** | 入力・貼り付けでライブ検索、Enter で即時検索 | — |
 | J | 接続テストが UI を止める／保存と別ボタン | **修正済（1.0.2）** | 「接続して保存」に統一し非同期化。履歴に接続可否、LAN 探索を追加 | — |
+| M | 「更新」タブの更新が必ず失敗する | **修正済（1.0.4）** | ダウンロードした `SuguSearch.exe` を同じ場所へコピーして SameFileError。ダウンロード名を分け、Release の exe も版付きの名前に。失敗時は詳細を表示し `data\update_error.log` に記録 | — |
 | L | 検索結果の Ctrl+クリックで複数選択できない | **修正済（1.0.3）** | 独自処理と Treeview 標準処理の二重トグル。行上のクリックは標準処理を止める | — |
 | K | 狭い幅でチップとボタンが重なる／チップが多いとはみ出す | **修正済（1.0.3）** | 10 個ごとに折り返し、入りきらないときはボタンを上の行へ | — |
 
