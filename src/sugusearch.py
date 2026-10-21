@@ -1480,6 +1480,9 @@ class EverythingSearchApp:
         self.chip_state = normalize_chip_state(
             self.settings.get("chip_state"), self.filter_defs
         )
+        # 起動時のフィルタ設定（閉じるときに「変更されています」と聞き、キャンセルならここへ戻す）
+        self._filters_at_start = json.loads(json.dumps(self.filter_defs))
+        self._chip_state_at_start = dict(self.chip_state)
         self.filter_chips = {}  # id -> TypeFilterChip
         self.filter_chip_host = None  # チップを置く Frame
         self.filter_stats = {}
@@ -1691,7 +1694,7 @@ class EverythingSearchApp:
         legend = tk.Frame(top_footer, bg=UI["surface"])
         legend.pack(side="left", fill="x", expand=True)
         self.footer_legend = legend
-        # 「フィルタ」ラベル: クリックで全ON ⇔ 全OFF
+        # 「フィルタ」ラベル: クリックで 初期 → すべて ON → すべて OFF → 初期 …
         self.filter_all_on_btn = tk.Label(
             legend,
             text="フィルタ",
@@ -2066,7 +2069,7 @@ class EverythingSearchApp:
         ).pack(fill="x", pady=(0, 4))
         tk.Label(
             card,
-            text="検索画面のチップ・色・拡張子・パス条件を編集します。保存すると settings.json に記録されます。",
+            text="検索画面のチップ・色・拡張子・パス条件を編集します。左の一覧で別の項目に切り替えると自動で保存されます（アプリを閉じるときに、保存するか取り消すかを選べます）。",
             bg=UI["surface"],
             fg=UI["text_muted"],
             font=FONT_SMALL,
@@ -2250,7 +2253,7 @@ class EverythingSearchApp:
         ).pack(anchor="w")
         tk.Checkbutton(
             opt_fr,
-            text="初期は明るい(表示側)",
+            text="初期表示",
             variable=self.fe_default_on_var,
             bg=UI["surface"],
             font=FONT_SMALL,
@@ -2358,14 +2361,16 @@ class EverythingSearchApp:
 
         bottom = tk.Frame(card, bg=UI["surface"])
         bottom.pack(fill="x", pady=(12, 0))
+        # 編集内容は一覧で別の項目に切り替えたとき（追加・削除・並べ替え時も）自動で保存される。
+        # 下の 2 つは「いま見ている項目をすぐ反映・保存したい」とき用。
         ModernButton(
-            bottom, text="この項目を反映", command=self._apply_filter_editor_fields
+            bottom, text="この項目を反映", command=self.save_filter_settings
         ).pack(side="left", padx=(0, 8))
         ModernButton(
             bottom, text="設定を保存", command=self.save_filter_settings, variant="primary"
         ).pack(side="left", padx=(0, 8))
         ModernButton(
-            bottom, text="既定に戻す", command=self.reset_filters_to_default, variant="ghost"
+            bottom, text="全て既定に戻す", command=self.reset_filters_to_default, variant="ghost"
         ).pack(side="left")
 
         self._refresh_filter_listbox()
@@ -2397,9 +2402,21 @@ class EverythingSearchApp:
         if not sel:
             return
         idx = sel[0]
-        if 0 <= idx < len(self._filter_list_ids):
-            # 編集中の内容を捨てて切り替え（反映ボタンで確定する運用）
-            self._load_filter_into_editor(self._filter_list_ids[idx])
+        if not (0 <= idx < len(self._filter_list_ids)):
+            return
+        target = self._filter_list_ids[idx]
+        if target == self._filter_editor_id:
+            return
+        # 編集中の項目を反映して自動保存（確認なし）。入力に誤りがあれば元の項目に留まる
+        prev = self._filter_editor_id
+        if prev:
+            if not self._apply_filter_editor_fields():
+                if prev in self._filter_list_ids:
+                    self.filter_listbox.selection_clear(0, tk.END)
+                    self.filter_listbox.selection_set(self._filter_list_ids.index(prev))
+                return
+            self._commit_filter_settings(select_id=target)
+        self._load_filter_into_editor(target)
 
     def _load_filter_into_editor(self, fid: str):
         filt = next((f for f in self.filter_defs if f["id"] == fid), None)
@@ -2451,39 +2468,40 @@ class EverythingSearchApp:
                 "どの拡張子グループにも入らないファイル用。削除できません。"
             )
 
-    def _apply_filter_editor_fields(self):
+    def _apply_filter_editor_fields(self, silent: bool = False) -> bool:
+        """
+        右側の編集内容を filter_defs へ反映する（保存はしない）。
+        入力に誤りがあれば何も変えずに False（silent でなければ理由を表示）。
+        """
         fid = self._filter_editor_id
         if not fid:
-            return
+            return True
         filt = next((f for f in self.filter_defs if f["id"] == fid), None)
         if not filt:
-            return
+            return True
+
+        def bad(title: str, msg: str) -> bool:
+            if not silent:
+                messagebox.showerror(title, msg)
+            return False
+
         label = self.fe_label_var.get().strip() or filt["id"]
         color = self.fe_color_var.get().strip() or "#E2E8F0"
         if not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
-            messagebox.showerror("入力エラー", "色は #RRGGBB 形式で指定してください。")
-            return
+            return bad("入力エラー", "色は #RRGGBB 形式で指定してください。")
         try:
             order = int(self.fe_order_var.get().strip())
         except ValueError:
-            messagebox.showerror("入力エラー", "並びは整数で指定してください。")
-            return
-
-        filt["label"] = label
-        filt["color"] = color
-        filt["order"] = order
-        filt["show_chip"] = bool(self.fe_show_chip_var.get())
-        filt["default_on"] = bool(self.fe_default_on_var.get())
-
+            return bad("入力エラー", "並びは整数で指定してください。")
+        exts = keywords = match_in = None
         if filt["kind"] == "extension":
-            raw = self.fe_ext_var.get().replace("、", ",").split(",")
-            filt["extensions"] = _normalize_extensions(raw)
-            if not filt["extensions"]:
-                messagebox.showwarning("入力不足", "拡張子を1つ以上指定してください。")
-                return
+            exts = _normalize_extensions(self.fe_ext_var.get().replace("、", ",").split(","))
+            if not exts:
+                return bad("入力不足", "拡張子を1つ以上指定してください。")
         if filt["kind"] == "path_keyword":
-            raw = self.fe_keywords_var.get().replace("、", ",").split(",")
-            filt["keywords"] = _normalize_keywords(raw)
+            keywords = _normalize_keywords(
+                self.fe_keywords_var.get().replace("、", ",").split(",")
+            )
             match_in = []
             if self.fe_match_full_var.get():
                 match_in.append("fullpath")
@@ -2492,27 +2510,33 @@ class EverythingSearchApp:
             if self.fe_match_name_var.get():
                 match_in.append("name")
             if not match_in:
-                messagebox.showwarning("入力不足", "照合先を1つ以上選んでください。")
-                return
+                return bad("入力不足", "照合先を1つ以上選んでください。")
+            if not keywords:
+                return bad("入力不足", "キーワードを1つ以上指定してください。")
+
+        filt["label"] = label
+        filt["color"] = color
+        filt["order"] = order
+        filt["show_chip"] = bool(self.fe_show_chip_var.get())
+        filt["default_on"] = bool(self.fe_default_on_var.get())
+        if exts is not None:
+            filt["extensions"] = exts
+        if keywords is not None:
+            filt["keywords"] = keywords
             filt["match_in"] = match_in
             filt["case_insensitive"] = bool(self.fe_case_var.get())
-            if not filt["keywords"]:
-                messagebox.showwarning("入力不足", "キーワードを1つ以上指定してください。")
-                return
-
         try:
             self.fe_color_preview.configure(bg=color)
         except tk.TclError:
             pass
         self.filter_defs = normalize_filter_definitions(self.filter_defs)
-        # 選択維持
-        self._refresh_filter_listbox()
-        if fid in self._filter_list_ids:
-            self.filter_listbox.selection_set(self._filter_list_ids.index(fid))
-        self.info_var.set(f"フィルタ「{label}」を編集内容に反映しました（保存は別ボタン）")
+        return True
 
     def _add_filter(self, kind: str):
         import time
+
+        if not self._apply_filter_editor_fields():
+            return
 
         fid = f"{kind}_{int(time.time() * 1000) % 1000000}"
         max_order = max((f.get("order", 0) for f in self.filter_defs), default=100)
@@ -2550,6 +2574,7 @@ class EverythingSearchApp:
             self.filter_listbox.selection_set(idx)
             self.filter_listbox.see(idx)
             self._load_filter_into_editor(fid)
+        self._commit_filter_settings(select_id=fid)
 
     def _delete_selected_filter(self):
         sel = self.filter_listbox.curselection()
@@ -2573,16 +2598,18 @@ class EverythingSearchApp:
         self.filter_defs = [f for f in self.filter_defs if f["id"] != fid]
         self.filter_defs = normalize_filter_definitions(self.filter_defs)
         self.chip_state.pop(fid, None)
+        self._filter_editor_id = None
         self._refresh_filter_listbox()
         if self._filter_list_ids:
             self.filter_listbox.selection_set(0)
             self._load_filter_into_editor(self._filter_list_ids[0])
-        else:
-            self._filter_editor_id = None
+        self._commit_filter_settings(select_id=self._filter_editor_id)
 
     def _move_filter(self, delta: int):
         sel = self.filter_listbox.curselection()
         if not sel:
+            return
+        if not self._apply_filter_editor_fields():
             return
         # 並びは order で制御。選択の order と隣の order を入れ替え
         ordered = sorted(self.filter_defs, key=lambda x: x.get("order", 0))
@@ -2604,11 +2631,17 @@ class EverythingSearchApp:
             ni = self._filter_list_ids.index(fid)
             self.filter_listbox.selection_set(ni)
             self._load_filter_into_editor(fid)
+        self._commit_filter_settings(select_id=fid)
 
     def save_filter_settings(self):
-        # 編集中フィールドがあれば先に反映
-        if self._filter_editor_id:
-            self._apply_filter_editor_fields()
+        """「この項目を反映」「設定を保存」: 編集中の項目を反映して保存（確認なし）。"""
+        if not self._apply_filter_editor_fields():
+            return
+        self._commit_filter_settings(select_id=self._filter_editor_id)
+        self.info_var.set("フィルタ設定を保存しました")
+
+    def _commit_filter_settings(self, select_id: str | None = None) -> bool:
+        """filter_defs を settings.json へ保存し、チップと一覧・検索結果に反映する（確認なし）。"""
         self.filter_defs = normalize_filter_definitions(self.filter_defs)
         self.settings["filters"] = self.filter_defs
         # チップ状態: 新規は default_on、既存 id は維持
@@ -2625,21 +2658,29 @@ class EverythingSearchApp:
             save_settings(self.settings)
         except OSError as e:
             messagebox.showerror("保存失敗", f"settings.json を保存できません。\n{e}")
-            return
+            return False
         self.rebuild_filter_chips()
-        # 既存結果を新しい分類で付け直す
         if self.all_results:
-            # tag を付け直すために再 parse はできないので、classify を再実行
             for r in self.all_results:
                 r["tag"] = classify_with_filters(r.get("type"), r.get("name"), self.filter_defs)
                 r["type_text"] = type_display_label(r["tag"], r.get("name"), self.filter_defs)
             self._on_filter_mode_changed()
-        messagebox.showinfo("保存完了", "フィルタ設定を保存しました。")
-        self._refresh_filter_listbox()
+        if hasattr(self, "filter_listbox"):
+            self._refresh_filter_listbox()
+            if select_id and select_id in self._filter_list_ids:
+                i = self._filter_list_ids.index(select_id)
+                self.filter_listbox.selection_clear(0, tk.END)
+                self.filter_listbox.selection_set(i)
+                self.filter_listbox.see(i)
+        return True
 
     def reset_filters_to_default(self):
-        if not messagebox.askyesno(
-            "確認", "フィルタ設定を出荷時の既定に戻しますか？\n（保存するまでファイルには書き込まれません）"
+        if not messagebox.askokcancel(
+            "全て既定に戻す",
+            "フィルタ設定を全て出荷時の既定に戻します。\n"
+            "追加したフィルタや変更した色・条件はなくなります。よろしいですか？",
+            icon="warning",
+            default="cancel",
         ):
             return
         self.filter_defs = default_filter_definitions()
@@ -2651,11 +2692,8 @@ class EverythingSearchApp:
         if self._filter_list_ids:
             self.filter_listbox.selection_set(0)
             self._load_filter_into_editor(self._filter_list_ids[0])
-        if self.all_results:
-            for r in self.all_results:
-                r["tag"] = classify_with_filters(r.get("type"), r.get("name"), self.filter_defs)
-                r["type_text"] = type_display_label(r["tag"], r.get("name"), self.filter_defs)
-            self._on_filter_mode_changed()
+        self._commit_filter_settings(select_id=self._filter_editor_id)
+        self.info_var.set("フィルタ設定を全て既定に戻しました")
 
     def _build_update_tab(self):
         parent = self.update_tab
@@ -2963,7 +3001,7 @@ class EverythingSearchApp:
             "・列ヘッダをクリック → 並び替え（種類 / 名前 / 場所 / サイズ / 日時）\n"
             "・下の各チップをクリック → 種類・重複・条件の表示切替（終了後も保持）\n"
             "  （暗い＝除外 / 重複は最新1件のみ。詳細は「フィルタ設定」タブ）\n"
-            "・「フィルタ」の文字をクリック → すべて ON ⇔ すべて OFF を切替\n"
+            "・「フィルタ」の文字をクリック → 初期表示 → すべて ON → すべて OFF の順に切替\n"
             "・対象フォルダ入力欄 → 履歴から過去のフォルダを選択\n"
             "・接続設定タブ → サーバーが別 PC のときのホスト/ポート\n"
             "・フィルタ設定タブ → 拡張子・色・条件・チップ表示の編集\n"
@@ -4153,18 +4191,38 @@ class EverythingSearchApp:
         return all(self.chip_state.get(fid, True) for fid in ids)
 
     def toggle_all_filters(self):
-        """「フィルタ」ラベル押下: すべて ON なら全 OFF、それ以外は全 ON。"""
-        turn_on = not self._all_visible_filters_on()
-        for fid in self._visible_filter_ids():
-            self.chip_state[fid] = turn_on
-        for fid, chip in self.filter_chips.items():
-            chip.set_enabled(turn_on)
-            self.chip_state[fid] = turn_on
-        self._persist_chip_state()
-        if turn_on:
-            self.info_var.set("フィルタをすべて ON（表示側）にしました")
+        """
+        「フィルタ」ラベル押下: 初期表示 → すべて ON → すべて OFF → 初期表示 … の順に切り替える。
+        初期表示は各フィルタの「初期表示」（default_on）。
+        今の状態がどれでもない（チップを個別に触った）ときは初期表示に戻す。
+        同じ並びになる段（初期表示が全部 ON など）は飛ばす。
+        """
+        visible = [f for f in self.filter_defs if f.get("show_chip", True)]
+        if not visible:
+            return
+        ids = [f["id"] for f in visible]
+        current = {fid: bool(self._chip_is_on(f)) for fid, f in zip(ids, visible)}
+        states = [
+            ("初期表示", {f["id"]: bool(f.get("default_on", True)) for f in visible}),
+            ("すべて ON（表示側）", {fid: True for fid in ids}),
+            ("すべて OFF（非表示側）", {fid: False for fid in ids}),
+        ]
+        idx = next((i for i, (_n, st) in enumerate(states) if st == current), None)
+        if idx is None:
+            label, target = states[0]
         else:
-            self.info_var.set("フィルタをすべて OFF（非表示側）にしました")
+            label, target = states[idx]
+            for step in range(1, len(states) + 1):
+                label, target = states[(idx + step) % len(states)]
+                if target != current:
+                    break
+        for fid, on in target.items():
+            self.chip_state[fid] = on
+            chip = self.filter_chips.get(fid)
+            if chip is not None:
+                chip.set_enabled(on)
+        self._persist_chip_state()
+        self.info_var.set(f"フィルタを{label}にしました")
         self._on_filter_mode_changed()
 
     def force_all_filters_on(self):
@@ -4328,8 +4386,32 @@ class EverythingSearchApp:
         except OSError:
             pass
 
+    def _filters_changed_since_start(self) -> bool:
+        def dump(x):
+            return json.dumps(x, ensure_ascii=False, sort_keys=True)
+
+        return dump(normalize_filter_definitions(self.filter_defs)) != dump(
+            normalize_filter_definitions(self._filters_at_start)
+        )
+
     def on_close(self):
-        """ウィンドウ終了時に状態を保存して閉じる。"""
+        """
+        ウィンドウ終了時。フィルタ設定が起動時から変わっていれば保存するか聞く。
+        OK … 保存して閉じる / キャンセル … 起動前の設定に戻して閉じる。
+        """
+        # 編集中で未反映の内容も変更に含める（入力に誤りがあるものは捨てる）
+        self._apply_filter_editor_fields(silent=True)
+        if self._filters_changed_since_start():
+            if messagebox.askokcancel(
+                "フィルタ設定",
+                "フィルタ設定が変更されています。保存しますか？\n\n"
+                "OK … 保存して閉じる\n"
+                "キャンセル … 変更を取り消して（起動前の設定に戻して）閉じる",
+            ):
+                self.settings["filters"] = normalize_filter_definitions(self.filter_defs)
+            else:
+                self.filter_defs = json.loads(json.dumps(self._filters_at_start))
+                self.chip_state = dict(self._chip_state_at_start)
         self._persist_chip_state()
         try:
             self.root.destroy()

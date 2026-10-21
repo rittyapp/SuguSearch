@@ -185,7 +185,7 @@ AB010 54        → AB010.*?54
 | `kind` | — | `folder` / `extension` / `other` / `path_keyword` / `builtin_dedupe`。それ以外は無視 |
 | `label` / `color` / `order` | 全部 | 表示名（40 文字まで）／`#RRGGBB`／小さいほど左・先 |
 | `show_chip` | 全部 | `false` でチップを出さず、常に「除外しない」側で動く |
-| `default_on` | 全部 | `chip_state` に無いときの初期値 |
+| `default_on` | 全部 | 画面の「初期表示」。`chip_state` に無いときの初期値で、「フィルタ」文字クリックの循環で戻る状態 |
 | `locked` | 全部 | `true` は削除不可（`type_other` と `builtin_dedupe` は常に `true`） |
 | `extensions` | `extension` | 小文字化され、`.` が無ければ補われる |
 | `keywords` / `match_in` / `case_insensitive` | `path_keyword` | 部分一致する文字列／`fullpath` `path` `name`／既定 `true` |
@@ -291,7 +291,7 @@ Windows の DPAPI（`crypt32.dll` の `CryptProtectData` / `CryptUnprotectData`�
 | スペースの緩い検索（`-`/`_` とは別扱い） | §2。重複キーは連動しない（§5） |
 | あいまい重複判定 | §5 |
 | フィルタ設定タブ（拡張子・色・条件・並び・チップ表示） | §8 |
-| チップ明暗の永続化・「フィルタ」文字クリックで全 ON | §8 保存タイミング |
+| チップ明暗の永続化・「フィルタ」文字クリックで 初期表示 → 全 ON → 全 OFF の循環（1.0.8） | §8 保存タイミング |
 | 初期の並び＝更新日時の新しい順 | §9 `toggle_sort` |
 | ライブ検索（280 ms デバウンス） | §9 `_run_live_search` |
 | 対象フォルダを選び直したときもその場で再検索（履歴選択 / フォルダ選択… / × でクリア） | §9 `select_folder_history` / `browse_folder` / `on_folder_clear_or_close` |
