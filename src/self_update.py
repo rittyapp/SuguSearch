@@ -179,28 +179,54 @@ def write_update_runner(
 ) -> Path:
     """
     本体終了後に current↔previous を差し替え、新 EXE を起動する bat を書く。
+    経過は data\\update_runner.log に残す（差し替えが進まないときの調査用）。
     """
     ensure_install_dirs(install_root)
     runner = install_root / "update_runner.bat"
-    current = install_root / "current"
-    previous = install_root / "previous"
     staging_exe = install_root / "staging" / "SuguSearch.exe"
-    # CP932-safe: ASCII only in bat body
+    log = install_root / "data" / "update_runner.log"
+    # CP932-safe: ASCII only in bat body（パスに日本語が入る場合も cp932 で書く）
     lines = [
         "@echo off",
         "chcp 932 >nul",
         "setlocal",
         f'cd /d "{install_root}"',
-        f"echo Waiting for PID {wait_pid} ...",
+        f'set "LOG={log}"',
+        f'echo [%date% %time%] start {new_version} wait pid {wait_pid}>> "%LOG%"',
         f'powershell -NoProfile -Command "try {{ Wait-Process -Id {wait_pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}"',
-        "timeout /t 1 /nobreak >nul",
+        "ping -n 2 127.0.0.1 >nul",
+        f'if not exist "{staging_exe}" (',
+        '  echo [%date% %time%] staging exe missing>> "%LOG%"',
+        "  goto launch",
+        ")",
         "if exist previous\\SuguSearch.exe.bak del /f /q previous\\SuguSearch.exe.bak",
         "if exist previous\\SuguSearch.exe move /y previous\\SuguSearch.exe previous\\SuguSearch.exe.bak >nul",
-        "if exist current\\SuguSearch.exe move /y current\\SuguSearch.exe previous\\SuguSearch.exe >nul",
+        "set /a TRY=0",
+        ":mv",
+        "if not exist current\\SuguSearch.exe goto moved",
+        "move /y current\\SuguSearch.exe previous\\SuguSearch.exe >nul 2>&1",
+        "if not exist current\\SuguSearch.exe goto moved",
+        "set /a TRY+=1",
+        "if %TRY% GEQ 15 goto locked",
+        "ping -n 2 127.0.0.1 >nul",
+        "goto mv",
+        ":locked",
+        'echo [%date% %time%] current exe is still in use, update skipped>> "%LOG%"',
+        "if exist previous\\SuguSearch.exe.bak move /y previous\\SuguSearch.exe.bak previous\\SuguSearch.exe >nul",
+        "goto launch",
+        ":moved",
         "if exist current\\version.txt move /y current\\version.txt previous\\version.txt >nul",
         f'copy /y "{staging_exe}" "current\\SuguSearch.exe" >nul',
-        f'echo {new_version}> current\\version.txt',
-        "start \"\" \"current\\SuguSearch.exe\"",
+        "if errorlevel 1 (",
+        '  echo [%date% %time%] copy failed, restoring previous>> "%LOG%"',
+        "  copy /y previous\\SuguSearch.exe current\\SuguSearch.exe >nul",
+        "  if exist previous\\version.txt copy /y previous\\version.txt current\\version.txt >nul",
+        "  goto launch",
+        ")",
+        f"echo {new_version}> current\\version.txt",
+        f'echo [%date% %time%] updated to {new_version}>> "%LOG%"',
+        ":launch",
+        'start "" "current\\SuguSearch.exe"',
         "exit /b 0",
     ]
     text = "\r\n".join(lines) + "\r\n"
@@ -210,6 +236,67 @@ def write_update_runner(
     except Exception:
         runner.write_text(text, encoding="utf-8")
     return runner
+
+
+def _ps_quote(text: str) -> str:
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+def launch_detached(runner: Path, cwd: Path) -> str:
+    """
+    差し替え bat をアプリから完全に切り離して起動する。
+    普通に子プロセスとして起動すると、アプリ（PyInstaller の EXE）の終了と一緒に
+    止められることがあり、1.0.4 までは差し替えが一度も実行されていなかった。
+    1) WMI（Win32_Process.Create）で起動 … 親がアプリではなくなる
+    2) だめならジョブから抜けて（CREATE_BREAKAWAY_FROM_JOB）起動
+    3) それもだめなら従来どおり
+    戻り値: 使った方法（ログ・表示用）
+    """
+    import subprocess
+
+    comspec = os.environ.get("COMSPEC", "cmd.exe")
+    if sys.platform != "win32":
+        subprocess.Popen([comspec, "/c", str(runner)], cwd=str(cwd), close_fds=True)
+        return "popen"
+
+    create_no_window = 0x08000000
+    detached = 0x00000008
+    new_group = 0x00000200
+    breakaway = 0x01000000
+    cmdline = f'"{comspec}" /c "{runner}"'
+    ps = (
+        "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+        f"-Arguments @{{CommandLine={_ps_quote(cmdline)}; CurrentDirectory={_ps_quote(cwd)}}}; "
+        "exit [int]$r.ReturnValue"
+    )
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            creationflags=create_no_window,
+            timeout=30,
+            capture_output=True,
+        )
+        if res.returncode == 0:
+            return "wmi"
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(
+            [comspec, "/c", str(runner)],
+            cwd=str(cwd),
+            creationflags=detached | new_group | breakaway,
+            close_fds=True,
+        )
+        return "breakaway"
+    except OSError:
+        pass
+    subprocess.Popen(
+        [comspec, "/c", str(runner)],
+        cwd=str(cwd),
+        creationflags=detached | new_group,
+        close_fds=True,
+    )
+    return "popen"
 
 
 def apply_update_and_restart(
@@ -254,15 +341,5 @@ def apply_update_and_restart(
     runner = write_update_runner(
         install_root, new_version=release.version, wait_pid=os.getpid()
     )
-    import subprocess
-
-    creationflags = 0
-    if sys.platform == "win32":
-        creationflags = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
-    subprocess.Popen(
-        [os.environ.get("COMSPEC", "cmd.exe"), "/c", str(runner)],
-        cwd=str(install_root),
-        creationflags=creationflags,
-        close_fds=True,
-    )
+    launch_detached(runner, install_root)
     return f"版 {release.version} のダウンロード準備ができました。"

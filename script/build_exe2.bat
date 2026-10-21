@@ -42,7 +42,7 @@ copy /Y "%ROOT%\README.MD" "%ROOT%\dist\README.MD" >nul
 if exist "%ROOT%\version.txt" (
   copy /Y "%ROOT%\version.txt" "%ROOT%\dist\version.txt" >nul
 ) else (
-  echo 1.0.4> "%ROOT%\dist\version.txt"
+  echo 1.0.5> "%ROOT%\dist\version.txt"
 )
 
 echo [4/4] ”z•z—p zip ‚ğì¬...

@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 GITHUB_REPO = "rittyapp/SuguSearch"
 INSTALL_DIR_NAME = "SuguSearch"
 # 旧アプリ（Everysearch）の設定を初回だけ引き継ぐ
