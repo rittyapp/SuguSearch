@@ -1,6 +1,6 @@
 # 仕組みとソース構成
 
-実装は単一ファイル [`src/sugusearch.py`](../src/sugusearch.py)（約 3,270 行）。
+実装は主に [`src/sugusearch.py`](../src/sugusearch.py)（約 4,800 行）。版数・配置先は `src/app_paths.py`、自己更新は `src/self_update.py`。
 外部依存は標準ライブラリ + `pywin32`（コピー機能のみ）。ネットワークは `urllib` だけ。
 
 操作方法は [usage.md](usage.md)、これからの話は [roadmap.md](roadmap.md)。
@@ -13,9 +13,10 @@
 入力文字列
   └ to_flexible_regex()      -/_ とスペースのゆらぎを正規表現へ
       └ search_everything()  http://host:port/ に GET（別スレッド）
+          │  （暗いチップの条件は build_everything_filter_terms() で検索式に含める）
           └ parse_results()  表示用の dict に整形
-              └ _apply_filters()        種類 → パス条件 → 重複
-                  └ apply_sort_and_display()  ソートして上位 200 件を表示
+              └ _apply_filters()        種類 → パス条件 → 重複（手元の最終チェック）
+                  └ apply_sort_and_display()  ソートして上位 500 件を表示
 ```
 
 Everything 本体は改造せず、**検索語を整形して HTTP API に渡すだけ**。
@@ -45,19 +46,27 @@ AB010 54        → AB010.*?54
 検索式:
 
 ```
-[folder: | file:]  [path:"対象フォルダ"]  regex:<変換後>
+[folder: | file:]  [path:"対象フォルダ"]  [チップ由来の除外条件]  regex:<変換後>
 ```
+
+`regex:` は必ず最後に置く。チップ由来の除外条件は §5 を参照。
 
 | パラメータ | 値 |
 |-----------|----|
 | `json` | `1` |
-| `count` | 既定 500／再取得時は最大 20000 |
+| `count` | 既定 500／再取得時は段階的に増やす（最大 20000） |
 | `path_column` / `size_column` / `date_modified_column` | `1` |
 | `sort` / `ascending` | `date_modified` / `0`（新しい順で取得） |
 
 - 認証: `user` か `password` があれば HTTP Basic ヘッダを付与
 - タイムアウト: 500 件以下は 15 秒、それ以上は `min(180, 20 + count // 200)` 秒
 - 検索はワーカースレッドで実行。応答は**世代番号**（`_search_gen`）で管理し、古い応答は破棄。UI 更新は必ず `root.after(0, ...)` 経由
+
+## 3.5 接続確認と LAN 探索
+
+- `probe_everything(host, port, user, password, timeout)` … `regex:^$` を `count=1` で問い合わせ、`ok`（JSON に `totalResults`）／`auth`（401・403）／`not_everything`（JSON でない等）／`down`（接続できない・タイムアウト）を返す。例外は投げない
+- `scan_lan_for_everything(prefixes, ports, …)` … 各 `/24` の 1〜254 × ポートに TCP 接続（0.4 秒・64 並列）を試し、つながった相手にだけ `probe_everything` を送る。254 × 3 ポートで数秒
+- 探索範囲は `lan_scan_prefixes(自 PC の IPv4)`（127.x と 169.254.x は除外）。VPN の先など別ネットワークは対象外
 
 ## 4. 結果の整形（`parse_results`）
 
@@ -74,15 +83,36 @@ AB010 54        → AB010.*?54
 
 ---
 
-## 5. フィルタ（`_apply_filters`）
+## 5. フィルタ（`build_everything_filter_terms` / `_apply_filters`）
 
-チップが **明るい = 除外しない / 暗い = 抑制**。適用順は固定。
+チップが **明るい = 除外しない / 暗い = 抑制**。
+
+### サーバー側で絞る（1.0.2〜）
+
+以前は「新しい順 500 件」を取ってから手元で絞っていたため、暗くしたチップの側（例: 大分 NAS）が 500 件を占めると、残したい側（例: 本社 NAS）が 1 件も届かないことがあった。
+1.0.2 から、暗いチップの条件を Everything の検索式に含め、**絞り込んだ後の 500 件**を受け取る。
+
+| チップ | 検索式に足す条件 |
+|--------|------------------|
+| パス条件（照合先にフルパスを含む）を暗く | `!nocase:path:"キーワード"`（大小文字を区別する設定なら `case:`） |
+| パス条件（照合先が名前だけ）を暗く | `!nocase:nopath:"キーワード"` |
+| 拡張子を暗く（その他は明るい） | `!ext:dwg;dxf` |
+| フォルダを暗く（その他は明るい） | `file:` |
+| その他を暗く | `<folder:\|ext:明るい拡張子;…>`（フォルダも暗ければ `ext:…` だけ） |
+
+- 照合先が「場所」だけの条件、`"` `*` `?` を含むキーワードは Everything で正確に表せないので送らない（手元だけで判定）
+- チップを切り替えて検索式が変わったら、Everything に取り直す（反映に少し時間がかかる）
+- 手元のフィルタも従来どおり必ず掛ける（下記）。サーバー側で落とし切れなかった分の最終チェック
+
+### 手元のフィルタ（`_apply_filters`）
+
+適用順は固定。
 
 1. **種類**（`folder` / `extension` / `other`）… 暗い種類を除外
 2. **パス条件**（`path_keyword`、`order` の小さい順）… 暗いときだけキーワード該当行を除外
 3. **重複**（`builtin_dedupe`）… 暗いときだけ同名を 1 件に集約
 
-除外件数はフィルタごとに集計され、件数バーに `<表示名>で N 件除外` と出る。
+除外件数は手元で除外した分だけがフィルタごとに集計され、件数バーに `<表示名>で N 件除外` と出る（サーバー側で除外した分は総数に反映済み）。
 
 ### 重複判定
 
@@ -100,13 +130,20 @@ AB010 54        → AB010.*?54
 | 定数 | 値 | 役割 |
 |------|----|------|
 | `MAX_RESULTS` | 500 | 通常検索での取得件数 |
-| `DISPLAY_LIMIT` | 200 | フィルタ後がこれ以下なら全件表示、超えたらこの件数まで |
-| `REFETCH_IF_FILTERED_LE` | 100 | フィルタ後がこれ以下なら追加取得の対象 |
+| `DISPLAY_LIMIT` | 500 | フィルタ後がこれ以下なら全件表示、超えたらこの件数まで |
+| `REFETCH_IF_FILTERED_LE` | 499 | フィルタ後がこれ以下なら追加取得の対象（主に「重複」で減った分） |
+| `REFETCH_GROWTH` | 4 | 追加取得で取得済みの何倍まで広げるか |
 | `MAX_RESULTS_HARD_CAP` | 20000 | 追加取得の上限 |
+| `INFO_WARN_FG` | `#DC2626` | 件数バーを警告表示するときの色（太字） |
+| `FILTER_CHIPS_PER_ROW` | 10 | チップ 1 行あたりの個数（超えたら折り返し） |
 | `FOLDER_HISTORY_MAX` | 20 | 対象フォルダ履歴の保持数 |
 | `LIVE_SEARCH_DEBOUNCE_MS` | 280 | ライブ検索のデバウンス |
 
-追加取得（`_needs_full_refetch` → `_schedule_refetch_all_async`）は、フィルタ後が 100 件以下 **かつ** 総数が取得済みより多いときに発動。確認ダイアログを出さず `min(総数, 20000)` 件で非同期に取り直し、完了後に一覧を差し替える。**1 検索につき 1 回だけ**（失敗しても再試行しない）。
+追加取得（`_needs_full_refetch` → `_schedule_refetch_all_async`）は、フィルタ後が `DISPLAY_LIMIT` 未満 **かつ** 総数が取得済みより多いときに発動。確認ダイアログを出さず `min(総数, 20000, max(取得済み×4, 2000))` 件で非同期に取り直し、完了後に一覧を差し替える。**1 検索につき 1 回だけ**（失敗しても再試行しない）。
+
+### 件数バーの警告表示
+
+総数が取得済みより多い（取り切れていない）か、フィルタ後が表示件数より多い（打ち切り）ときは、件数バーを **赤い太字**（文字の大きさは同じ）にする。`info_var` の書き込みを `trace_add` で拾い、`_info_warn_next` が立っているときだけ警告色にするので、ほかのメッセージは通常色に戻る。
 
 ## 7. ファイルのコピー（`copy_files_to_clipboard`）
 
@@ -118,12 +155,13 @@ AB010 54        → AB010.*?54
 
 ## 8. settings.json
 
-アプリ（EXE またはスクリプト）と**同じフォルダ**に作られる（`_runtime_dir()`）。EXE 版は `dist\settings.json`、スクリプト版は `src\settings.json`。**両者は共有されない。**
+セットアップ済み（`%LOCALAPPDATA%\SuguSearch\` に配置）なら `%LOCALAPPDATA%\SuguSearch\data\settings.json`。それ以外はアプリ（EXE またはスクリプト）と**同じフォルダ**（`app_paths.settings_path()`）。スクリプト版は `src\settings.json`。**両者は共有されない。**
 無ければ既定値で起動し、保存操作で作られる。壊れた JSON は読み飛ばして既定値になる（起動は失敗しない）。Git 管理外。雛形は [settings.example.json](settings.example.json)。
 
 | キー | 型 | 既定 | 内容 |
 |------|----|------|------|
 | `host` / `port` | 文字列 / 数値 | `127.0.0.1` / `8888` | Everything HTTP サーバー（ポートは 1〜65535） |
+| `connection_history` | 配列 | `[]` | 接続履歴 `{host, port, last_ok}`（新しい順・最大 20 件）。`last_ok` は最後に接続できた日時 `YYYY-MM-DD HH:MM` |
 | `user` | 文字列 | `""` | Basic 認証のユーザー名（平文） |
 | `password` | 文字列 | `""` | Basic 認証のパスワード。**`enc:v1:<base64>` 形式で暗号化保存**（下記） |
 | `search_folder` | 文字列 | `""` | 最後に使った対象フォルダ。`"パス"` 形式に正規化。空＝全体検索 |
@@ -170,7 +208,7 @@ AB010 54        → AB010.*?54
 
 ### 保存されるタイミング
 
-接続設定の保存 / フィルタ設定の保存 / **チップをクリックした瞬間** / Enter・検索ボタンでの検索（対象フォルダと履歴）/ 履歴の追加・削除 / **ウィンドウを閉じたとき**。
+**接続して保存**（つながらなかった場合は「保存する」を選んだときだけ）/ フィルタ設定の保存 / **チップをクリックした瞬間** / Enter・検索ボタンでの検索（対象フォルダと履歴）/ 履歴の追加・削除 / **ウィンドウを閉じたとき**。
 
 ### パスワードの暗号化
 
@@ -200,30 +238,37 @@ Windows の DPAPI（`crypt32.dll` の `CryptProtectData` / `CryptUnprotectData`�
 
 ### モジュール内の区分
 
-| 行の目安 | 区分 | 主な要素 |
-|----------|------|----------|
-| 22–133 | 環境・定数 | `_fix_tcl_tk_paths` / `_runtime_dir` / `_resource_dir` / 件数定数 / 配色 |
-| 135–383 | フィルタ定義 | `default_filter_definitions` / `normalize_filter_definitions` / `classify_with_filters` / `path_keyword_matches` |
-| 385–453 | パスワードの暗号化 | `_dpapi_transform` / `encrypt_secret` / `decrypt_secret` |
-| 455–560 | 設定 I/O | `load_settings` / `save_settings` / `quote_folder_path` |
-| 562–682 | 検索語とデータ加工 | `to_flexible_regex` / `normalize_name_for_dedup` / `dedupe_files_keep_newest` |
-| 684–766 | Win32 連携 | `copy_files_to_clipboard` |
-| 768–828 | 表示用ヘルパー | `format_size` / `format_datetime` / `type_display_label` |
-| 830–951 | Everything アクセス | `search_everything` / `parse_results` |
-| 953–1073 | UI 部品 | `TypeFilterChip` / `ModernButton` |
-| 1078–3247 | `EverythingSearchApp` | タブ構築・検索・フィルタ・履歴・結果操作 |
-| 3250–3272 | エントリポイント | `main()` |
+行番号はすぐずれるので、関数名で検索する。上から次の順に並んでいる。
+
+| 区分 | 主な要素 |
+|------|----------|
+| 環境・定数 | `_fix_tcl_tk_paths` / `_runtime_dir` / `_resource_dir` / 件数・接続・LAN 探索の定数 / 配色 |
+| フィルタ定義 | `default_filter_definitions` / `normalize_filter_definitions` / `classify_with_filters` / `path_keyword_matches` / `build_everything_filter_terms` |
+| パスワードの暗号化 | `_dpapi_transform` / `encrypt_secret` / `decrypt_secret` |
+| 設定 I/O | `load_settings` / `save_settings` / `normalize_connection_history` / `quote_folder_path` |
+| 検索語とデータ加工 | `to_flexible_regex` / `normalize_name_for_dedup` / `dedupe_files_keep_newest` |
+| Win32 連携 | `copy_files_to_clipboard` |
+| 表示用ヘルパー | `format_size` / `format_datetime` / `type_display_label` |
+| Everything アクセス | `probe_everything` / `probe_status_text` / `lan_scan_prefixes` / `scan_lan_for_everything` / `search_everything` / `parse_results` |
+| UI 部品 | `TypeFilterChip` / `ModernButton` |
+| `EverythingSearchApp` | タブ構築・検索・フィルタ・履歴・接続・結果操作 |
+| エントリポイント | `main()` |
 
 ### `EverythingSearchApp` の要所
 
 | メソッド | 内容 |
 |----------|------|
-| `create_widgets` / `_build_*_tab` | ヘッダ + 4 タブ（検索 / 接続設定 / フィルタ設定 / 使い方） |
+| `create_widgets` / `_build_*_tab` | ヘッダ + 5 タブ（検索 / 接続設定 / フィルタ設定 / 更新 / 使い方） |
 | `_run_live_search` / `on_search` | ライブ検索（280 ms デバウンス、履歴は増やさない）／即時検索（履歴を更新） |
 | `_start_search_job` | スレッドで検索し、世代番号で古い応答を破棄 |
-| `_on_filter_mode_changed` | モードが変わったら再検索、同じならクライアント側フィルタのみ |
+| `_on_filter_mode_changed` | フォルダのみモードやチップ由来の検索式が変わったら再検索、同じなら手元のフィルタのみ |
+| `rebuild_filter_chips` / `_layout_footer` | チップを 10 個ごとに折り返して配置。2 行以上、または横に入りきらないときはボタンを上の行へ |
+| `connect_and_save` | 接続確認（別スレッド）→ つながれば保存。つながらなければ理由を出して保存するか確認 |
+| `_probe_connection_history_async` | 接続履歴を開いたとき各接続先を並列で確認（2 秒、30 秒キャッシュ） |
+| `_check_failover_async` | 検索で接続できないとき履歴の他の接続先を確認し、件数バーで案内（自動では切り替えない） |
+| `open_lan_scan_dialog` | 自 PC の /24 を（入力中のポート・8888・80）で探し、見つかった接続先を一覧表示 |
 | `_apply_filters` / `apply_sort_and_display` | 絞り込み → ソート → 上位 `DISPLAY_LIMIT` 件を表示 |
-| `_update_info_label` | 件数バーの文言生成 |
+| `_update_info_label` | 件数バーの文言生成。取り切れていない／打ち切りなら赤太字 |
 | `toggle_sort` / `_update_heading_labels` | ソート切り替えと ↑↓ 表示（「名前」＝ファイル名、「場所」＝フルパス） |
 | `copy_selected_files` / `_select_row_for_click` | ファイルコピーと Ctrl / Shift の複数選択処理 |
 | `_persist_chip_state` | チップ明暗の保存（チップ操作時と終了時） |
@@ -232,7 +277,9 @@ Windows の DPAPI（`crypt32.dll` の `CryptProtectData` / `CryptUnprotectData`�
 
 - **`_fix_tcl_tk_paths`**: 複数バージョンの Python 混在で `TCL_LIBRARY` / `TK_LIBRARY` がずれる問題への対処。`import tkinter` より前に実行する必要があるためモジュール冒頭で呼んでいる
 - **`_runtime_dir` と `_resource_dir`**: 設定は EXE の隣（書き込み可）、同梱リソースは `sys._MEIPASS`（onefile の展開先）と使い分け
-- **エラー表示**: 検索失敗はダイアログを出さず件数バーの文言のみ（誤操作防止）。保存やコピーの失敗はダイアログ
+- **エラー表示**: 検索失敗はダイアログを出さず件数バーの文言のみ（誤操作防止、赤太字）。保存やコピーの失敗はダイアログ
+- **画面の文言**: 製品名（Everything）は出さず「サーバー」「検索サーバー」と書く。例外は使い方タブのダウンロード先（`EVERYTHING_DOWNLOAD_URL`）だけ
+- **初期ウィンドウ**: 1280×960（画面に収まらなければ縮める）。接続履歴を開いても下部が隠れない高さ
 
 ---
 
@@ -251,6 +298,11 @@ Windows の DPAPI（`crypt32.dll` の `CryptProtectData` / `CryptUnprotectData`�
 | 件数の自動再取得 | §6 |
 | フォルダのみモード | §5 |
 | 複数選択 + エクスプローラーへのコピー | §7 |
+| チップ条件をサーバー側で絞る（1.0.2） | §5 |
+| 対象フォルダ欄の手入力・貼り付けで再検索（1.0.2） | §9 |
+| 取得・表示 500 件、打ち切り時は件数バー赤太字（1.0.2） | §6 |
+| 接続して保存・接続履歴の状態表示・LAN 探索・接続失敗時の案内（1.0.2） | §9 |
+| チップの折り返し・初期ウィンドウ拡大・画面文言から製品名を除去（1.0.3） | §9 |
 | パスワードの暗号化保存（DPAPI） | §8 |
 | 「名前」列をファイル名で並べ替え（以前はフルパス基準だった） | §9 `toggle_sort` |
 

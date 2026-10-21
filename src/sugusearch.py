@@ -96,15 +96,28 @@ DEFAULT_SETTINGS = {
 }
 
 EVERYTHING_DOWNLOAD_URL = "https://www.voidtools.com/"
+# フィルタチップ 1 行あたりの個数（超えたら次の行へ）
+FILTER_CHIPS_PER_ROW = 10
 
 # Everything から最初に取る件数（新しい順で取得）
 MAX_RESULTS = 500
 # フィルタ後の件数がこの値以下なら全件表示。超える場合はこの件数まで。
-DISPLAY_LIMIT = 200
-# フィルタ後がこの件数以下 かつ 未取得分がある → 確認なしで広めに再取得
-REFETCH_IF_FILTERED_LE = 100
+DISPLAY_LIMIT = 500
+# フィルタ後がこの件数未満 かつ 未取得分がある → 確認なしで広めに再取得
+# （種類・パス条件は Everything 側で絞るので、ここで減るのは主に「重複」の分）
+REFETCH_IF_FILTERED_LE = DISPLAY_LIMIT - 1
 # 再取得時の安全上限（これ以上は切る）
 MAX_RESULTS_HARD_CAP = 20000
+# 再取得 1 回で取る件数の目安（取得済みの何倍まで広げるか）
+REFETCH_GROWTH = 4
+# 件数が「取り切れていない／表示を打ち切った」ときの件数バーの色
+INFO_WARN_FG = "#DC2626"
+# 接続確認のタイムアウト（秒）
+CONNECT_TEST_TIMEOUT = 5
+HISTORY_PROBE_TIMEOUT = 2
+# LAN 探索: TCP 接続を試す待ち時間（秒）と同時実行数
+LAN_SCAN_CONNECT_TIMEOUT = 0.4
+LAN_SCAN_WORKERS = 64
 FOLDER_HISTORY_MAX = 20
 CONNECTION_HISTORY_MAX = 20
 # 入力ごとのライブ検索（デバウンス ms）
@@ -387,6 +400,96 @@ def path_keyword_matches(row: dict, filt: dict) -> bool:
             return True
     return False
 
+
+# Everything の検索語として安全に埋め込めない文字（含む場合はサーバー側に送らず手元だけで判定）
+_EVERYTHING_UNSAFE_CHARS = frozenset('"*?')
+
+
+def _everything_ext_list(exts: list[str]) -> str:
+    """[".dwg", ".dxf"] -> "dwg;dxf"（ext: 用）"""
+    out = []
+    for e in exts or []:
+        s = str(e).strip().lstrip(".").lower()
+        if s and not (set(s) & _EVERYTHING_UNSAFE_CHARS) and not any(
+            c in s for c in " ;|<>"
+        ):
+            out.append(s)
+    return ";".join(out)
+
+
+def build_everything_filter_terms(filters: list[dict], chip_is_on) -> str:
+    """
+    OFF（暗い）チップの除外条件を Everything の検索語にする。
+    これで「新しい順 N 件」が絞り込み後の N 件になり、
+    取得上限に押し出されて結果が出ない問題を防ぐ。
+
+    - 種類（フォルダ / 拡張子 / その他）
+    - パス条件（path_keyword）
+    重複（builtin_dedupe）は Everything では判定できないので手元のまま。
+    手元のフィルタも従来どおり後段で必ず掛けるので、ここは
+    「取りこぼさない範囲で減らす」方針（判定が怪しいものは送らない）。
+    """
+    terms: list[str] = []
+
+    # ---- 種類 ----
+    type_filts = [
+        f for f in filters if f.get("kind") in ("folder", "extension", "other")
+    ]
+    folder_f = [f for f in type_filts if f.get("kind") == "folder"]
+    ext_f = [f for f in type_filts if f.get("kind") == "extension"]
+    other_f = [f for f in type_filts if f.get("kind") == "other"]
+
+    folder_on = any(chip_is_on(f) for f in folder_f) if folder_f else True
+    other_on = any(chip_is_on(f) for f in other_f) if other_f else True
+    any_type_on = any(chip_is_on(f) for f in type_filts)
+    all_type_on = all(chip_is_on(f) for f in type_filts)
+
+    if type_filts and any_type_on and not all_type_on:
+        if other_on:
+            # その他 ON: OFF のものだけ除外
+            if not folder_on:
+                terms.append("file:")
+            off_exts: list[str] = []
+            for f in ext_f:
+                if not chip_is_on(f):
+                    off_exts.extend(f.get("extensions") or [])
+            ext_s = _everything_ext_list(off_exts)
+            if ext_s:
+                terms.append(f"!ext:{ext_s}")
+        else:
+            # その他 OFF: ON の拡張子（＋フォルダ）だけに限定
+            on_exts: list[str] = []
+            for f in ext_f:
+                if chip_is_on(f):
+                    on_exts.extend(f.get("extensions") or [])
+            ext_s = _everything_ext_list(on_exts)
+            if ext_s and folder_on:
+                terms.append(f"<folder:|ext:{ext_s}>")
+            elif ext_s:
+                terms.append(f"ext:{ext_s}")
+            # ext_s が空でフォルダだけ ON → 既存の「フォルダのみ」モード（folder:）に任せる
+
+    # ---- パス条件 ----
+    for f in filters:
+        if f.get("kind") != "path_keyword" or chip_is_on(f):
+            continue
+        match_in = f.get("match_in") or ["fullpath", "path", "name"]
+        if "fullpath" in match_in:
+            modifier = "path:"
+        elif match_in == ["name"]:
+            modifier = "nopath:"
+        else:
+            # 「場所だけ」は Everything で正確に表せない → 手元だけで判定
+            continue
+        case_mod = "nocase:" if f.get("case_insensitive", True) else "case:"
+        for kw in f.get("keywords") or []:
+            kw = str(kw).strip()
+            if not kw or (set(kw) & _EVERYTHING_UNSAFE_CHARS):
+                continue
+            terms.append(f'!{case_mod}{modifier}"{kw}"')
+
+    return " ".join(terms)
+
 # PowerShell 程度の読みやすさを意識した大きめフォント
 FONT_UI = ("Yu Gothic UI", 13)
 FONT_UI_BOLD = ("Yu Gothic UI", 13, "bold")
@@ -529,7 +632,10 @@ def normalize_connection_history(raw) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        result.append({"host": host, "port": port})
+        entry = {"host": host, "port": port}
+        if isinstance(item, dict) and item.get("last_ok"):
+            entry["last_ok"] = str(item.get("last_ok"))[:16]
+        result.append(entry)
         if len(result) >= CONNECTION_HISTORY_MAX:
             break
     return result
@@ -931,6 +1037,139 @@ def type_display_label(tag: str, name: str, filters: list[dict] | None = None) -
 # =========================
 # Everything HTTP 問い合わせ
 # =========================
+def probe_everything(
+    host: str,
+    port: int,
+    user: str = "",
+    password: str = "",
+    timeout: float = CONNECT_TEST_TIMEOUT,
+) -> dict:
+    """
+    Everything HTTP サーバーに軽い問い合わせをして接続可否を返す（例外は投げない）。
+    戻り値: {"status": "ok"|"auth"|"not_everything"|"down", "ms": int, "error": str}
+    """
+    import time
+
+    params = {"search": "regex:^$", "json": 1, "count": 1}
+    url = f"http://{host}:{int(port)}/?{urlencode(params)}"
+    req = Request(url)
+    if user or password:
+        token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+        req.add_header("Authorization", f"Basic {token}")
+    t0 = time.perf_counter()
+    try:
+        with urlopen(req, timeout=timeout) as res:
+            body = res.read(1024 * 64).decode("utf-8", errors="replace")
+        ms = int((time.perf_counter() - t0) * 1000)
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return {"status": "not_everything", "ms": ms, "error": "JSON ではない応答"}
+        if isinstance(data, dict) and "totalResults" in data:
+            return {"status": "ok", "ms": ms, "error": ""}
+        return {"status": "not_everything", "ms": ms, "error": "検索サーバーの応答ではない"}
+    except HTTPError as e:
+        ms = int((time.perf_counter() - t0) * 1000)
+        if e.code in (401, 403):
+            return {"status": "auth", "ms": ms, "error": f"HTTP {e.code}"}
+        return {"status": "not_everything", "ms": ms, "error": f"HTTP {e.code}"}
+    except Exception as e:  # URLError / timeout / OSError など
+        ms = int((time.perf_counter() - t0) * 1000)
+        reason = getattr(e, "reason", None) or e
+        return {"status": "down", "ms": ms, "error": str(reason)}
+
+
+def probe_status_text(result: dict | None) -> tuple[str, str]:
+    """接続確認結果 → (表示文字, 色)。"""
+    if not result:
+        return "確認中…", "#64748B"
+    st = result.get("status")
+    if st == "ok":
+        return f"● 接続OK {result.get('ms', 0)}ms", "#15803D"
+    if st == "auth":
+        return "🔒 認証エラー", "#B45309"
+    if st == "not_everything":
+        return "× 検索サーバーではない", "#B91C1C"
+    return "× 応答なし", "#B91C1C"
+
+
+def lan_scan_prefixes(own_ips: list[str]) -> list[str]:
+    """自 PC の IPv4 から探索する /24 の頭（"192.168.11."）を返す。"""
+    out = []
+    for ip in own_ips:
+        parts = str(ip).split(".")
+        if len(parts) != 4 or not all(x.isdigit() for x in parts):
+            continue
+        if parts[0] == "127" or (parts[0] == "169" and parts[1] == "254"):
+            continue
+        prefix = ".".join(parts[:3]) + "."
+        if prefix not in out:
+            out.append(prefix)
+    return out
+
+
+def scan_lan_for_everything(
+    prefixes: list[str],
+    ports: list[int],
+    user: str = "",
+    password: str = "",
+    progress=None,
+    cancel_event: threading.Event | None = None,
+) -> list[dict]:
+    """
+    同じネットワーク（/24）内で Everything HTTP サーバーを探す。
+    1) 各アドレス×ポートへ TCP 接続を試す（短いタイムアウト・並列）
+    2) つながった相手にだけ Everything の問い合わせを送って確認
+    戻り値: [{"host", "port", "status", "ms"}]（ok → auth の順）
+    progress(done, total) は別スレッドから呼ばれる。
+    """
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+
+    targets = [
+        (f"{pre}{n}", int(port))
+        for pre in prefixes
+        for n in range(1, 255)
+        for port in ports
+    ]
+    total = len(targets)
+    done = 0
+    lock = threading.Lock()
+
+    def try_connect(target):
+        nonlocal done
+        host, port = target
+        ok = False
+        if not (cancel_event and cancel_event.is_set()):
+            try:
+                with socket.create_connection((host, port), timeout=LAN_SCAN_CONNECT_TIMEOUT):
+                    ok = True
+            except OSError:
+                ok = False
+        with lock:
+            done += 1
+            d = done
+        if progress:
+            try:
+                progress(d, total)
+            except Exception:
+                pass
+        return target if ok else None
+
+    with ThreadPoolExecutor(max_workers=LAN_SCAN_WORKERS) as ex:
+        open_targets = [t for t in ex.map(try_connect, targets) if t]
+
+    found = []
+    for host, port in open_targets:
+        if cancel_event and cancel_event.is_set():
+            break
+        r = probe_everything(host, port, user, password, timeout=3)
+        if r["status"] in ("ok", "auth"):
+            found.append({"host": host, "port": port, "status": r["status"], "ms": r["ms"]})
+    found.sort(key=lambda x: (0 if x["status"] == "ok" else 1, x["ms"]))
+    return found
+
+
 def search_everything(
     query_regex: str,
     search_folder: str = "",
@@ -940,9 +1179,11 @@ def search_everything(
     password: str = "",
     count: int | None = None,
     item_type: str | None = None,
+    extra_terms: str = "",
 ):
     """
     Everything HTTP サーバーへ問い合わせる（JSON）。
+    extra_terms: フィルタチップ由来の除外条件（build_everything_filter_terms）。
     path: で配下に限定し、regex: で -/_ ゆらぎを吸収する。
     item_type: "folder" のとき folder: を付与（フォルダのみ）。
     count 未指定時は MAX_RESULTS。
@@ -956,6 +1197,9 @@ def search_everything(
         parts.append("file:")
     if folder:
         parts.append(f'path:"{folder}"')
+    if extra_terms:
+        parts.append(extra_terms)
+    # regex: は必ず最後（正規表現中の記号を他の語に巻き込まないため）
     parts.append(f"regex:{query_regex}")
     search_query = " ".join(parts)
 
@@ -980,7 +1224,7 @@ def search_everything(
         req.add_header("Authorization", f"Basic {token}")
 
     # 件数が多いときはタイムアウトを延ばす
-    timeout = 15 if fetch_count <= MAX_RESULTS else min(180, 20 + fetch_count // 200)
+    timeout = 15 if fetch_count <= 500 else min(180, 20 + fetch_count // 200)
     with urlopen(req, timeout=timeout) as res:
         data = res.read().decode("utf-8", errors="replace")
         return json.loads(data)
@@ -1210,7 +1454,14 @@ class EverythingSearchApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"すぐサーチ  {read_version()}")
-        self.root.geometry("1240x780")
+        # 接続履歴を開いても下部が隠れないよう縦を広めに（画面に収まる範囲で）
+        try:
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        except tk.TclError:
+            sw, sh = 1920, 1080
+        win_w = max(960, min(1280, sw - 80))
+        win_h = max(520, min(960, sh - 100))
+        self.root.geometry(f"{win_w}x{win_h}")
         # 下部ボタン＋検索欄が隠れない程度の最小サイズ
         self.root.minsize(960, 520)
         self.root.configure(bg=UI["bg"])
@@ -1240,6 +1491,15 @@ class EverythingSearchApp:
         self._refetch_done_for_search = False
         # 現在 all_results を取ったときの item_type（None / "folder"）
         self._results_item_type: str | None = None
+        # 直近に Everything へ送ったフィルタ由来の除外条件
+        self._active_filter_terms = ""
+        # 件数バー: 次の表示を警告色にするか
+        self._info_warn_next = False
+        # 接続確認: {"host:port": (結果dict, 時刻)}
+        self._conn_status: dict = {}
+        self._history_probe_running = False
+        self._conn_busy = False
+        self._failover_checking = False
         # 非同期検索（世代番号で古い応答を破棄）
         self._search_gen = 0
         self._search_busy = False
@@ -1423,9 +1683,14 @@ class EverythingSearchApp:
 
         top_footer = tk.Frame(footer, bg=UI["surface"])
         top_footer.pack(fill="x")
+        self.footer_top = top_footer
+        self._footer_stacked = None
+        # 幅が変わったらチップとボタンの並べ方を決め直す
+        top_footer.bind("<Configure>", lambda _e: self._layout_footer())
 
         legend = tk.Frame(top_footer, bg=UI["surface"])
         legend.pack(side="left", fill="x", expand=True)
+        self.footer_legend = legend
         # 「フィルタ」ラベル: クリックで全ON ⇔ 全OFF
         self.filter_all_on_btn = tk.Label(
             legend,
@@ -1437,7 +1702,7 @@ class EverythingSearchApp:
             padx=4,
             pady=2,
         )
-        self.filter_all_on_btn.pack(side="left", padx=(0, 8))
+        self.filter_all_on_btn.pack(side="left", anchor="n", padx=(0, 8))
         self.filter_all_on_btn.bind(
             "<Button-1>", lambda _e: self.toggle_all_filters()
         )
@@ -1454,7 +1719,9 @@ class EverythingSearchApp:
         self.rebuild_filter_chips()
 
         actions = tk.Frame(top_footer, bg=UI["surface"])
-        actions.pack(side="right")
+        actions.pack(side="right", anchor="n")
+        self.footer_actions = actions
+        self._layout_footer()
         ModernButton(
             actions,
             text="選択ファイルを開く",
@@ -1534,6 +1801,10 @@ class EverythingSearchApp:
         self.folder_entry.bind("<Button-1>", self._on_folder_entry_click)
         self.folder_entry.bind("<Down>", self._on_folder_entry_down)
         self.folder_entry.bind("<Escape>", lambda _e: self.hide_folder_history())
+        # 手入力・貼り付けでも検索し直す（Enter は即時）
+        self.folder_entry.bind("<Return>", self._on_folder_entry_return)
+        self.folder_entry.bind("<KeyRelease>", self._on_folder_key_release)
+        self.folder_entry.bind("<<Paste>>", self._on_keyword_paste)
 
         # 履歴閉時: 入力クリア / 履歴開時: 一覧を閉じる
         self.folder_clear_btn = ModernButton(
@@ -1567,14 +1838,17 @@ class EverythingSearchApp:
         self.info_var = tk.StringVar(value="型番・図番を入力して検索してください")
         info_bar = tk.Frame(parent, bg=UI["bg"])
         info_bar.pack(side="top", fill="x", padx=16, pady=(0, 4))
-        tk.Label(
+        self.info_label = tk.Label(
             info_bar,
             textvariable=self.info_var,
             bg=UI["bg"],
             fg=UI["text_muted"],
             font=FONT_SMALL,
             anchor="w",
-        ).pack(fill="x")
+        )
+        self.info_label.pack(fill="x")
+        # 件数バーは通常は灰色。取り切れていない／打ち切り表示のときだけ赤太字
+        self.info_var.trace_add("write", self._on_info_var_write)
 
         # 結果テーブル（残り領域を占有。縮小時はここだけが縮む）
         result_outer = tk.Frame(parent, bg=UI["bg"])
@@ -1648,7 +1922,7 @@ class EverythingSearchApp:
 
         tk.Label(
             card,
-            text="Everything HTTP サーバー接続",
+            text="検索サーバー接続",
             bg=UI["surface"],
             fg=UI["text"],
             font=FONT_UI_BOLD,
@@ -1656,7 +1930,7 @@ class EverythingSearchApp:
         ).pack(fill="x", pady=(0, 4))
         tk.Label(
             card,
-            text="Everything が別 PC で動いている場合は、そのホスト名または IP を指定してください。"
+            text="検索サーバーが別 PC で動いている場合は、そのホスト名または IP を指定してください。"
             "ホスト／ポート欄をクリックすると接続履歴から選べます。",
             bg=UI["surface"],
             fg=UI["text_muted"],
@@ -1728,18 +2002,19 @@ class EverythingSearchApp:
         self.settings_btn_row.pack(fill="x", pady=(8, 0))
         ModernButton(
             self.settings_btn_row,
-            text="設定を保存",
-            command=self.save_connection_settings,
+            text="接続して保存",
+            command=self.connect_and_save,
             variant="primary",
-        ).pack(side="left", padx=(0, 8))
-        ModernButton(
-            self.settings_btn_row, text="接続テスト", command=self.test_connection
         ).pack(side="left", padx=(0, 8))
         ModernButton(
             self.settings_btn_row,
             text="自身に接続",
             command=self.connect_to_self_and_test,
-            variant="ghost",
+        ).pack(side="left", padx=(0, 8))
+        ModernButton(
+            self.settings_btn_row,
+            text="LAN内のサーバーを探す",
+            command=self.open_lan_scan_dialog,
         ).pack(side="left")
 
         self.settings_status_var = tk.StringVar(
@@ -1758,9 +2033,11 @@ class EverythingSearchApp:
 
         tip = (
             "ヒント:\n"
-            "・Everything → ツール → オプション → HTTP サーバー を有効にする\n"
-            "・「自身に接続」でこのPCのIPを入れ、接続テストまで行います\n"
-            "・ホスト／ポート欄をクリックすると、以前使った接続先を選べます\n"
+            "・サーバー側で HTTP サーバー機能を有効にしておく（ポートは通常 8888）\n"
+            "・「接続して保存」は接続を確認し、つながったら保存します（つながらない場合は保存するか確認）\n"
+            "・「自身に接続」でこのPCのIPを入れ、接続して保存まで行います\n"
+            "・ホスト／ポート欄をクリックすると、以前使った接続先と接続できるかが表示されます\n"
+            "・どこにもつながらないときは「LAN内のサーバーを探す」で同じネットワーク内を探せます\n"
             "・他 PC から使う場合は、ファイアウォールでポートを許可する\n"
             "・アプリの更新は「更新」タブから行えます\n"
             "・接続設定はこのPCだけに保存されます（他の人の設定とは別）"
@@ -2356,7 +2633,7 @@ class EverythingSearchApp:
             for r in self.all_results:
                 r["tag"] = classify_with_filters(r.get("type"), r.get("name"), self.filter_defs)
                 r["type_text"] = type_display_label(r["tag"], r.get("name"), self.filter_defs)
-            self.apply_sort_and_display()
+            self._on_filter_mode_changed()
         messagebox.showinfo("保存完了", "フィルタ設定を保存しました。")
         self._refresh_filter_listbox()
 
@@ -2378,7 +2655,7 @@ class EverythingSearchApp:
             for r in self.all_results:
                 r["tag"] = classify_with_filters(r.get("type"), r.get("name"), self.filter_defs)
                 r["type_text"] = type_display_label(r["tag"], r.get("name"), self.filter_defs)
-            self.apply_sort_and_display()
+            self._on_filter_mode_changed()
 
     def _build_update_tab(self):
         parent = self.update_tab
@@ -2642,8 +2919,8 @@ class EverythingSearchApp:
             "・下の「ファイルコピー」「パスのコピー」ボタンでも同じ操作ができます\n"
             "\n"
             "【準備（初回のみ）】\n"
-            "1. Everything をインストールして起動する（下のリンクから入手）\n"
-            "2. Everything → ツール → オプション → HTTP サーバー を有効にする\n"
+            "1. サーバーをインストールして起動する（下のリンクから入手）\n"
+            "2. サーバーの設定で HTTP サーバー機能を有効にする\n"
             "   （ポートは通常 8888）\n"
             "3. ブラウザで http://127.0.0.1:8888/ が開けば OK\n"
             "\n"
@@ -2660,27 +2937,41 @@ class EverythingSearchApp:
             "  （暗い＝除外 / 重複は最新1件のみ。詳細は「フィルタ設定」タブ）\n"
             "・「フィルタ」の文字をクリック → すべて ON ⇔ すべて OFF を切替\n"
             "・対象フォルダ入力欄 → 履歴から過去のフォルダを選択\n"
-            "・接続設定タブ → Everything が別 PC のときのホスト/ポート\n"
+            "・接続設定タブ → サーバーが別 PC のときのホスト/ポート\n"
             "・フィルタ設定タブ → 拡張子・色・条件・チップ表示の編集\n"
         )
-        tk.Label(
-            card,
-            text=usage,
+        # 画面が低くても全部読めるよう、スクロールできる読み取り専用テキストにする
+        usage_label = tk.Frame(card, bg=UI["surface"])
+        usage_label.pack(fill="both", expand=True, pady=(0, 12))
+        usage_text = tk.Text(
+            usage_label,
             bg=UI["surface"],
             fg=UI["text"],
             font=FONT_SMALL,
-            anchor="nw",
-            justify="left",
-        ).pack(fill="both", expand=True, pady=(0, 12))
+            wrap="word",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            cursor="arrow",
+        )
+        usage_scroll = ttk.Scrollbar(
+            usage_label, orient="vertical", command=usage_text.yview
+        )
+        usage_text.configure(yscrollcommand=usage_scroll.set)
+        usage_scroll.pack(side="right", fill="y")
+        usage_text.pack(side="left", fill="both", expand=True)
+        usage_text.insert("1.0", usage)
+        usage_text.configure(state="disabled")
 
+        # ダウンロード先は画面が低くても切れないよう下端に固定
         link_box = tk.Frame(card, bg=UI["surface_2"], highlightbackground=UI["border"], highlightthickness=1)
-        link_box.pack(fill="x", pady=(4, 0))
+        link_box.pack(side="bottom", fill="x", pady=(4, 0), before=usage_label)
         inner = tk.Frame(link_box, bg=UI["surface_2"])
         inner.pack(fill="x", padx=12, pady=12)
 
         tk.Label(
             inner,
-            text="Everything のダウンロード",
+            text="サーバーのダウンロード先",
             bg=UI["surface_2"],
             fg=UI["text"],
             font=FONT_UI_BOLD,
@@ -2688,7 +2979,7 @@ class EverythingSearchApp:
         ).pack(fill="x")
         tk.Label(
             inner,
-            text="公式サイト（voidtools）から最新版を入手できます。",
+            text="下記のサイトから入手できます。",
             bg=UI["surface_2"],
             fg=UI["text_muted"],
             font=FONT_SMALL,
@@ -2948,8 +3239,10 @@ class EverythingSearchApp:
             except OSError:
                 pass
 
-    def add_connection_to_history(self, host: str, port: int, persist: bool = True):
-        """使った接続先を履歴の先頭へ。"""
+    def add_connection_to_history(
+        self, host: str, port: int, persist: bool = True, connected: bool = False
+    ):
+        """使った接続先を履歴の先頭へ（connected=True なら最終接続日時も更新）。"""
         host = (host or "").strip() or "127.0.0.1"
         try:
             port = int(port)
@@ -2959,6 +3252,11 @@ class EverythingSearchApp:
             port = 8888
         entry = {"host": host, "port": port}
         key = f"{host.lower()}:{port}"
+        for h in self.get_connection_history():
+            if f"{str(h.get('host', '')).lower()}:{h.get('port')}" == key and h.get("last_ok"):
+                entry["last_ok"] = h["last_ok"]
+        if connected:
+            entry["last_ok"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         history = [entry] + [
             h
             for h in self.get_connection_history()
@@ -2988,6 +3286,7 @@ class EverythingSearchApp:
             fill="x", pady=(0, 8), before=self.settings_btn_row
         )
         self._rebuild_connection_history_list()
+        self._probe_connection_history_async()
 
     def hide_connection_history(self):
         if not self.connection_history_open:
@@ -3069,15 +3368,36 @@ class EverythingSearchApp:
             )
             del_btn.pack(side="right")
 
-            def _hover_in(e, w=path_btn, r=row, d=del_btn):
-                w.configure(bg=UI["accent_line"])
-                r.configure(bg=UI["accent_line"])
-                d.configure(bg=UI["accent_line"])
+            key = f"{str(item.get('host', '')).lower()}:{item.get('port')}"
+            cached = self._conn_status.get(key)
+            st_text, st_color = probe_status_text(cached[0] if cached else None)
+            status_lbl = tk.Label(
+                row,
+                text=st_text,
+                bg=UI["surface"],
+                fg=st_color,
+                font=FONT_SMALL,
+                padx=6,
+            )
+            status_lbl.pack(side="right")
+            last_ok = item.get("last_ok")
+            last_lbl = tk.Label(
+                row,
+                text=f"最終接続 {last_ok}" if last_ok else "",
+                bg=UI["surface"],
+                fg=UI["text_muted"],
+                font=FONT_SMALL,
+                padx=6,
+            )
+            last_lbl.pack(side="right")
 
-            def _hover_out(e, w=path_btn, r=row, d=del_btn):
-                w.configure(bg=UI["surface"])
-                r.configure(bg=UI["surface"])
-                d.configure(bg=UI["surface"])
+            def _hover_in(e, w=path_btn, r=row, d=del_btn, s=status_lbl, l=last_lbl):
+                for x in (w, r, d, s, l):
+                    x.configure(bg=UI["accent_line"])
+
+            def _hover_out(e, w=path_btn, r=row, d=del_btn, s=status_lbl, l=last_lbl):
+                for x in (w, r, d, s, l):
+                    x.configure(bg=UI["surface"])
 
             def _select(e, it=item):
                 self.select_connection_history(it)
@@ -3086,6 +3406,10 @@ class EverythingSearchApp:
                 self.delete_connection_history(it)
                 return "break"
 
+            for w in (status_lbl, last_lbl):
+                w.bind("<Enter>", _hover_in)
+                w.bind("<Leave>", _hover_out)
+                w.bind("<Button-1>", _select)
             for w in (path_btn, row):
                 w.bind("<Enter>", _hover_in)
                 w.bind("<Leave>", _hover_out)
@@ -3102,11 +3426,12 @@ class EverythingSearchApp:
             port = 8888
         self.host_var.set(host)
         self.port_var.set(str(port))
-        self.add_connection_to_history(host, port)
         self.hide_connection_history()
         if self.host_entry is not None:
             self.host_entry.focus_set()
-        self.settings_status_var.set(f"履歴から選択: {host}:{port}")
+        self.settings_status_var.set(
+            f"履歴から選択: {host}:{port} — 「接続して保存」で切り替わります"
+        )
 
     def delete_connection_history(self, item: dict):
         key = f"{str(item.get('host', '')).lower()}:{item.get('port')}"
@@ -3119,36 +3444,348 @@ class EverythingSearchApp:
         self._rebuild_connection_history_list()
 
     # ----- settings actions -----
-    def save_connection_settings(self):
+    def _read_connection_fields(self):
+        """入力欄 → (host, port, user, password)。ポート不正なら None。"""
         host = self.host_var.get().strip() or "127.0.0.1"
-        port_text = self.port_var.get().strip()
         try:
-            port = int(port_text)
+            port = int(self.port_var.get().strip())
             if not (1 <= port <= 65535):
                 raise ValueError
         except ValueError:
             messagebox.showerror("入力エラー", "ポートは 1〜65535 の数値で指定してください。")
-            return
+            return None
+        return host, port, self.user_var.get(), self.password_var.get()
 
+    def connect_and_save(self, extra_note: str = ""):
+        """接続を確認し、つながったら保存。つながらなければ保存するか確認。"""
+        if self._conn_busy:
+            return
+        fields = self._read_connection_fields()
+        if fields is None:
+            return
+        host, port, user, password = fields
+        self._conn_busy = True
+        self.hide_connection_history()
+        self.settings_status_var.set(f"接続を確認中… {host}:{port}")
+
+        def worker():
+            result = probe_everything(host, port, user, password, timeout=CONNECT_TEST_TIMEOUT)
+
+            def done():
+                self._conn_busy = False
+                key = f"{host.lower()}:{port}"
+                self._conn_status[key] = (result, dt.datetime.now())
+                note = f"\n\n{extra_note}" if extra_note else ""
+                if result["status"] == "ok":
+                    self._save_connection(host, port, user, password, connected=True)
+                    self.settings_status_var.set(
+                        f"接続OK・保存しました: {host}:{port}（{result['ms']}ms）"
+                    )
+                    messagebox.showinfo(
+                        "接続して保存",
+                        f"サーバーに接続できました。設定を保存しました。\n{host}:{port}{note}",
+                    )
+                    self._rerun_search_after_connection_change()
+                    return
+                if result["status"] == "auth":
+                    reason = "ユーザー名またはパスワードが違います（認証エラー）。"
+                elif result["status"] == "not_everything":
+                    reason = f"応答はありましたが検索サーバーではないようです（{result['error']}）。"
+                else:
+                    reason = (
+                        f"応答がありません（{result['error']}）。\n"
+                        "サーバーの HTTP サーバー機能が有効か、ポート番号、相手 PC の電源を確認してください。"
+                    )
+                self.settings_status_var.set(f"接続できません: {host}:{port}")
+                if messagebox.askyesno(
+                    "接続できません",
+                    f"{host}:{port}\n{reason}{note}\n\n"
+                    "接続できませんでしたが、この設定を保存しますか？\n"
+                    "（相手 PC が起動していない時間帯など）",
+                    icon="warning",
+                    default="no",
+                ):
+                    self._save_connection(host, port, user, password, connected=False)
+                    self.settings_status_var.set(f"保存しました（未接続）: {host}:{port}")
+
+            try:
+                self.root.after(0, done)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _rerun_search_after_connection_change(self):
+        """接続先が変わったら、入力中の検索をやり直す。"""
+        if self.keyword_var.get().strip():
+            self._last_regex = ""
+            self._run_live_search()
+
+    def save_connection_settings(self):
+        """互換用: 入力欄の内容を接続確認なしで保存する。"""
+        fields = self._read_connection_fields()
+        if fields is None:
+            return
+        host, port, user, password = fields
+        if self._save_connection(host, port, user, password, connected=False):
+            self.settings_status_var.set(f"保存しました: {host}:{port}")
+
+    def _save_connection(self, host, port, user, password, connected: bool) -> bool:
         self.settings["host"] = host
         self.settings["port"] = port
-        self.settings["user"] = self.user_var.get()
-        self.settings["password"] = self.password_var.get()
+        self.settings["user"] = user
+        self.settings["password"] = password
         self.settings["search_folder"] = quote_folder_path(self.folder_var.get())
         # 現在のフォルダも履歴へ
         if self.settings["search_folder"]:
             self.add_folder_to_history(self.settings["search_folder"], persist=False)
-        self.add_connection_to_history(host, port, persist=False)
+        self.add_connection_to_history(host, port, persist=False, connected=connected)
         self.hide_connection_history()
 
         try:
             save_settings(self.settings)
         except OSError as e:
             messagebox.showerror("保存失敗", f"設定ファイルを保存できませんでした。\n{e}")
+            return False
+        return True
+
+    # ----- 接続履歴の接続確認 -----
+    def _probe_connection_history_async(self, force: bool = False):
+        """履歴の接続先を並列で確認し、終わったら一覧を描き直す。"""
+        if self._history_probe_running:
+            return
+        history = self.get_connection_history()
+        now = dt.datetime.now()
+        todo = []
+        for h in history:
+            key = f"{str(h.get('host', '')).lower()}:{h.get('port')}"
+            cached = self._conn_status.get(key)
+            if force or not cached or (now - cached[1]).total_seconds() > 30:
+                todo.append((key, h))
+        if not todo:
+            return
+        self._history_probe_running = True
+        user, password = self.user_var.get(), self.password_var.get()
+
+        def worker():
+            from concurrent.futures import ThreadPoolExecutor
+
+            def one(arg):
+                key, h = arg
+                return key, probe_everything(
+                    h["host"], h["port"], user, password, timeout=HISTORY_PROBE_TIMEOUT
+                )
+
+            with ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
+                results = list(ex.map(one, todo))
+
+            def done():
+                self._history_probe_running = False
+                stamp = dt.datetime.now()
+                for key, r in results:
+                    self._conn_status[key] = (r, stamp)
+                if self.connection_history_open:
+                    self._rebuild_connection_history_list()
+
+            try:
+                self.root.after(0, done)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_failover_async(self, failed_conn: dict):
+        """
+        検索で接続できなかったとき、履歴の他の接続先を確認して案内する。
+        別サーバーは索引の中身が違うことがあるので、勝手には切り替えない。
+        """
+        if self._failover_checking:
+            return
+        failed_key = f"{str(failed_conn['host']).lower()}:{failed_conn['port']}"
+        others = [
+            h
+            for h in self.get_connection_history()
+            if f"{str(h.get('host', '')).lower()}:{h.get('port')}" != failed_key
+        ]
+        gen = self._search_gen
+        if not others:
+            self._set_info_warn(
+                f"{failed_conn['host']}:{failed_conn['port']} に接続できません — "
+                "接続設定タブの「LAN内のサーバーを探す」で探せます"
+            )
+            return
+        self._failover_checking = True
+        user, password = failed_conn["user"], failed_conn["password"]
+
+        def worker():
+            from concurrent.futures import ThreadPoolExecutor
+
+            def one(h):
+                return h, probe_everything(
+                    h["host"], h["port"], user, password, timeout=HISTORY_PROBE_TIMEOUT
+                )
+
+            with ThreadPoolExecutor(max_workers=min(8, len(others))) as ex:
+                results = list(ex.map(one, others))
+
+            def done():
+                self._failover_checking = False
+                stamp = dt.datetime.now()
+                for h, r in results:
+                    self._conn_status[
+                        f"{str(h.get('host', '')).lower()}:{h.get('port')}"
+                    ] = (r, stamp)
+                if gen != self._search_gen:
+                    return  # その後に別の検索が走った
+                alive = [h for h, r in results if r["status"] == "ok"]
+                head = f"{failed_conn['host']}:{failed_conn['port']} に接続できません — "
+                if alive:
+                    names = "、".join(format_connection_history_label(h) for h in alive[:3])
+                    self._set_info_warn(
+                        head + f"履歴の {names} は接続できます（接続設定タブで切り替え）"
+                    )
+                else:
+                    self._set_info_warn(
+                        head + "履歴の接続先もすべて応答なし。"
+                        "接続設定タブの「LAN内のサーバーを探す」で探せます"
+                    )
+
+            try:
+                self.root.after(0, done)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ----- LAN 内の Everything 探索 -----
+    def open_lan_scan_dialog(self):
+        """同じネットワーク内の Everything HTTP サーバーを探して一覧表示する。"""
+        if getattr(self, "_lan_dialog", None) is not None:
+            try:
+                self._lan_dialog.lift()
+                return
+            except tk.TclError:
+                self._lan_dialog = None
+
+        _primary, own_ips = self._detect_own_ipv4()
+        prefixes = lan_scan_prefixes(own_ips)
+        try:
+            cur_port = int(self.port_var.get().strip())
+        except ValueError:
+            cur_port = 8888
+        ports = []
+        for p in (cur_port, 8888, 80):
+            if p not in ports:
+                ports.append(p)
+        user, password = self.user_var.get(), self.password_var.get()
+
+        win = tk.Toplevel(self.root)
+        self._lan_dialog = win
+        win.title("LAN内のサーバーを探す")
+        win.configure(bg=UI["surface"])
+        win.geometry("620x420")
+        win.transient(self.root)
+
+        if not prefixes:
+            tk.Label(
+                win,
+                text="このPCのネットワーク（IPv4）が見つかりませんでした。LAN に接続しているか確認してください。",
+                bg=UI["surface"], fg=UI["text"], font=FONT_SMALL, wraplength=580, justify="left",
+            ).pack(fill="x", padx=16, pady=16)
+            ModernButton(win, text="閉じる", command=win.destroy, variant="ghost").pack(pady=8)
+            win.bind("<Destroy>", lambda e: setattr(self, "_lan_dialog", None) if e.widget is win else None)
             return
 
-        self.settings_status_var.set(f"保存しました: {host}:{port}")
-        messagebox.showinfo("保存完了", f"接続設定を保存しました。\n{host}:{port}")
+        scope = "、".join(f"{p}1〜254" for p in prefixes)
+        tk.Label(
+            win,
+            text=(
+                f"探す範囲: {scope}（ポート {', '.join(map(str, ports))}）\n"
+                "同じネットワーク内だけを探します。VPN の先の拠点は対象外です。"
+            ),
+            bg=UI["surface"], fg=UI["text_muted"], font=FONT_SMALL,
+            anchor="w", justify="left", wraplength=580,
+        ).pack(fill="x", padx=16, pady=(14, 6))
+
+        status_var = tk.StringVar(value="探しています… 0%")
+        tk.Label(
+            win, textvariable=status_var, bg=UI["surface"], fg=UI["text"],
+            font=FONT_UI, anchor="w",
+        ).pack(fill="x", padx=16)
+
+        listbox = tk.Listbox(win, font=FONT_UI, height=8, activestyle="none")
+        listbox.pack(fill="both", expand=True, padx=16, pady=8)
+
+        btn_row = tk.Frame(win, bg=UI["surface"])
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        found: list[dict] = []
+        cancel = threading.Event()
+
+        def use_selected(_e=None):
+            sel = listbox.curselection()
+            if not sel or sel[0] >= len(found):
+                messagebox.showinfo("未選択", "接続先を選んでください。", parent=win)
+                return
+            item = found[sel[0]]
+            self.host_var.set(item["host"])
+            self.port_var.set(str(item["port"]))
+            win.destroy()
+            self.connect_and_save(extra_note="LAN内の探索で見つかった接続先です。")
+
+        def close():
+            cancel.set()
+            win.destroy()
+
+        ModernButton(
+            btn_row, text="この接続先に接続して保存", command=use_selected, variant="primary"
+        ).pack(side="left", padx=(0, 8))
+        ModernButton(btn_row, text="閉じる", command=close, variant="ghost").pack(side="left")
+        listbox.bind("<Double-Button-1>", use_selected)
+        win.protocol("WM_DELETE_WINDOW", close)
+        win.bind(
+            "<Destroy>",
+            lambda e: (cancel.set(), setattr(self, "_lan_dialog", None)) if e.widget is win else None,
+        )
+
+        last_pct = [-1]
+
+        def progress(done_n, total_n):
+            pct = int(done_n * 100 / max(1, total_n))
+            if pct != last_pct[0] and pct % 5 == 0:
+                last_pct[0] = pct
+                try:
+                    self.root.after(0, lambda: status_var.set(f"探しています… {pct}%"))
+                except (tk.TclError, RuntimeError):
+                    pass
+
+        def worker():
+            results = scan_lan_for_everything(
+                prefixes, ports, user, password, progress=progress, cancel_event=cancel
+            )
+
+            def done():
+                if cancel.is_set():
+                    return
+                found.extend(results)
+                listbox.delete(0, tk.END)
+                for r in results:
+                    text, _c = probe_status_text(r)
+                    listbox.insert(tk.END, f"{r['host']}:{r['port']}    {text}")
+                if results:
+                    status_var.set(f"{len(results)} 件見つかりました。選んで「接続して保存」してください")
+                    listbox.selection_set(0)
+                else:
+                    status_var.set(
+                        "見つかりませんでした。相手 PC の電源、サーバーの HTTP サーバー機能、"
+                        "ファイアウォールを確認してください"
+                    )
+
+            try:
+                self.root.after(0, done)
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     @staticmethod
     def _detect_own_ipv4() -> tuple[str, list[str]]:
@@ -3193,49 +3830,14 @@ class EverythingSearchApp:
         self.settings_status_var.set(
             f"自身のIPを設定: {primary}"
             + (f"（他候補: {', '.join(all_ips[1:])}）" if len(all_ips) > 1 else "")
-            + " — 接続テスト中…"
+            + " — 接続確認中…"
         )
         self.root.update_idletasks()
-        self.test_connection(extra_note=f"このPCのIP {primary} でテストしました。")
+        self.connect_and_save(extra_note=f"このPCのIP {primary} で接続しました。")
 
     def test_connection(self, extra_note: str = ""):
-        host = self.host_var.get().strip() or "127.0.0.1"
-        try:
-            port = int(self.port_var.get().strip())
-        except ValueError:
-            messagebox.showerror("入力エラー", "ポートは数値で指定してください。")
-            return
-        user = self.user_var.get()
-        password = self.password_var.get()
-        try:
-            data = search_everything(
-                query_regex="^$",
-                search_folder="",
-                host=host,
-                port=port,
-                user=user,
-                password=password,
-            )
-            # 空に近い regex でも応答があれば接続OK
-            total = data.get("totalResults", 0)
-            self.add_connection_to_history(host, port)
-            self.settings_status_var.set(
-                f"接続成功: {host}:{port}（応答あり / total={total}）"
-            )
-            msg = f"Everything に接続できました。\n{host}:{port}"
-            if extra_note:
-                msg += f"\n\n{extra_note}"
-            messagebox.showinfo("接続成功", msg)
-        except Exception as e:
-            self.settings_status_var.set(f"接続失敗: {host}:{port}")
-            msg = f"接続できませんでした。\n{host}:{port}\n\n{e}"
-            if extra_note:
-                msg += f"\n\n{extra_note}"
-            msg += (
-                "\n\nEverything の HTTP サーバーが有効か、"
-                "ポート番号が合っているか確認してください。"
-            )
-            messagebox.showerror("接続失敗", msg)
+        """互換用: 旧「接続テスト」→ 接続して保存。"""
+        self.connect_and_save(extra_note=extra_note)
 
     # ----- search / sort -----
     def _cancel_live_debounce(self):
@@ -3264,6 +3866,25 @@ class EverythingSearchApp:
             ):
                 return
         self._schedule_live_search()
+
+    def _on_folder_key_release(self, event=None):
+        """対象フォルダ欄の手入力でもライブ検索（カーソル移動等は無視）。"""
+        if event is not None and event.keysym in (
+            "Return", "KP_Enter", "Tab", "Escape", "Up", "Down", "Left", "Right",
+            "Home", "End", "Prior", "Next",
+            "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+        ):
+            return
+        self._schedule_live_search()
+
+    def _on_folder_entry_return(self, _event=None):
+        self.hide_folder_history()
+        self.on_search()
+        return "break"
+
+    def _current_filter_terms(self) -> str:
+        """今のチップ状態から Everything に送る除外条件。"""
+        return build_everything_filter_terms(self.filter_defs, self._chip_is_on)
 
     def _on_keyword_paste(self, _event=None):
         # 貼り付け後に文字列が反映されてから検索
@@ -3296,7 +3917,12 @@ class EverythingSearchApp:
 
         folder_now = quote_folder_path(self.folder_var.get())
         # フォルダ欄は正規化だけ（履歴はライブでは増やさない）
-        if self.folder_var.get().strip() != folder_now:
+        # 入力中に引用符を足すとカーソルが飛ぶので、フォーカス中は書き換えない
+        try:
+            editing_folder = self.root.focus_get() is self.folder_entry
+        except (KeyError, tk.TclError):
+            editing_folder = False
+        if not editing_folder and self.folder_var.get().strip() != folder_now:
             self.folder_var.set(folder_now)
 
         regex = to_flexible_regex(keyword)
@@ -3306,6 +3932,7 @@ class EverythingSearchApp:
             regex == self._last_regex
             and folder_now == self._last_folder
             and item_type == self._results_item_type
+            and self._current_filter_terms() == self._active_filter_terms
             and self.all_results
             and not self._search_busy
         ):
@@ -3429,6 +4056,7 @@ class EverythingSearchApp:
         for w in self.filter_chip_host.winfo_children():
             w.destroy()
         self.filter_chips = {}
+        idx = 0
         for f in sorted(self.filter_defs, key=lambda x: x.get("order", 0)):
             if not f.get("show_chip", True):
                 continue
@@ -3441,9 +4069,42 @@ class EverythingSearchApp:
             )
             # セッション状態を反映
             chip.set_enabled(self._chip_is_on(f))
-            chip.pack(side="left", padx=(0, 6))
+            # 10 個を超えたら 2 行目、20 個を超えたら 3 行目…
+            row, col = divmod(idx, FILTER_CHIPS_PER_ROW)
+            chip.grid(row=row, column=col, sticky="w", padx=(0, 6), pady=(0 if row == 0 else 4, 0))
+            idx += 1
             self.filter_chips[f["id"]] = chip
         self.configure_tree_tags()
+        self._layout_footer()
+
+    def _layout_footer(self):
+        """
+        チップが 1 行に収まるときはボタンと横並び。
+        2 行以上になるときはボタンを上の行に出し、チップに横幅を全部使わせる。
+        """
+        legend = getattr(self, "footer_legend", None)
+        actions = getattr(self, "footer_actions", None)
+        top = getattr(self, "footer_top", None)
+        if legend is None or actions is None or top is None:
+            return
+        multi = len(getattr(self, "filter_chips", {}) or {}) > FILTER_CHIPS_PER_ROW
+        if not multi:
+            # 1 行でも、ボタンと横に並べて入りきらなければ縦に積む
+            avail = top.winfo_width()
+            need = legend.winfo_reqwidth() + actions.winfo_reqwidth() + 16
+            if avail > 1 and need > avail:
+                multi = True
+        if multi == self._footer_stacked:
+            return
+        self._footer_stacked = multi
+        legend.pack_forget()
+        actions.pack_forget()
+        if multi:
+            actions.pack(side="top", anchor="e", pady=(0, 8))
+            legend.pack(side="top", fill="x")
+        else:
+            legend.pack(side="left", fill="x", expand=True)
+            actions.pack(side="right", anchor="n")
 
     def on_filter_chip_toggle(self, tag: str, enabled: bool):
         self.chip_state[tag] = enabled
@@ -3525,8 +4186,12 @@ class EverythingSearchApp:
             return
 
         desired = self._desired_item_type()
-        if desired != self._results_item_type:
-            # モードが変わった → バックグラウンドで取り直し（UI は止めない）
+        if (
+            desired != self._results_item_type
+            or self._current_filter_terms() != self._active_filter_terms
+        ):
+            # 種類・パス条件が変わった → Everything 側で絞り直す（UI は止めない）
+            # 手元だけで絞ると、取得上限に押し出された結果が出てこないため
             self._refetch_done_for_search = False
             self._start_search_job(
                 regex=self._last_regex,
@@ -3561,6 +4226,8 @@ class EverythingSearchApp:
         self._search_gen += 1
         gen = self._search_gen
         self._search_busy = True
+        filter_terms = self._current_filter_terms()
+        self._active_filter_terms = filter_terms
         self.info_var.set(status_text)
         if clear_list:
             self._clear_tree()
@@ -3584,6 +4251,7 @@ class EverythingSearchApp:
                     password=conn["password"],
                     count=count,
                     item_type=item_type,
+                    extra_terms=filter_terms,
                 )
             except Exception as e:
                 err = e
@@ -3593,8 +4261,18 @@ class EverythingSearchApp:
                     return  # より新しい検索が走っている
                 self._search_busy = False
                 if err is not None:
-                    self.info_var.set("検索に失敗しました（条件を変えて再試行できます）")
                     # 誤操作防止のためダイアログは出さず、操作は継続可能
+                    if isinstance(err, HTTPError) and err.code in (401, 403):
+                        self._set_info_warn(
+                            "検索に失敗しました: 認証エラー（接続設定のユーザー名・パスワードを確認）"
+                        )
+                    elif isinstance(err, (URLError, OSError)) and not isinstance(err, HTTPError):
+                        self._set_info_warn(
+                            f"{conn['host']}:{conn['port']} に接続できません — 他の接続先を確認中…"
+                        )
+                        self._check_failover_async(conn)
+                    else:
+                        self._set_info_warn("検索に失敗しました（条件を変えて再試行できます）")
                     return
                 try:
                     self.all_results = parse_results(data, self.filter_defs)
@@ -3722,7 +4400,11 @@ class EverythingSearchApp:
         フィルタ後が少ないときの広め再取得を非同期で行う。
         UI は止めず、メッセージのみ出す（内部事情は出さない）。
         """
-        target = min(int(self.total_results), MAX_RESULTS_HARD_CAP)
+        target = min(
+            int(self.total_results),
+            MAX_RESULTS_HARD_CAP,
+            max(len(self.all_results) * REFETCH_GROWTH, MAX_RESULTS * REFETCH_GROWTH),
+        )
         if target <= len(self.all_results):
             self._refetch_done_for_search = True
             return
@@ -3792,6 +4474,24 @@ class EverythingSearchApp:
                 tags=(row["tag"],),
             )
 
+    def _on_info_var_write(self, *_args):
+        warn = bool(getattr(self, "_info_warn_next", False))
+        self._info_warn_next = False
+        try:
+            if warn:
+                self.info_label.configure(
+                    fg=INFO_WARN_FG, font=(FONT_SMALL[0], FONT_SMALL[1], "bold")
+                )
+            else:
+                self.info_label.configure(fg=UI["text_muted"], font=FONT_SMALL)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _set_info_warn(self, text: str):
+        """件数バーに赤太字で出す。"""
+        self._info_warn_next = True
+        self.info_var.set(text)
+
     def _update_info_label(self, extra_note: str = ""):
         shown = len(self.display_results)
         fetched = len(self.all_results)
@@ -3831,6 +4531,8 @@ class EverythingSearchApp:
         ]
         if type_filts and not any(self._chip_is_on(f) for f in type_filts):
             parts.append("すべての種類が非表示")
+        # 全件を取り切れていない／表示を打ち切っている → 赤太字
+        self._info_warn_next = bool(total > fetched or shown < filtered_count)
         self.info_var.set("  ·  ".join(parts))
 
     def _selected_row(self):
@@ -3971,7 +4673,7 @@ class EverythingSearchApp:
     def _select_row_for_click(self, event, *, multi_aware: bool = True) -> str | None:
         """
         クリック位置の行を選択する。
-        multi_aware 時: Ctrl=トグル追加, Shift=範囲, 既選択上の普通クリック=複数維持（ドラッグ用）
+        multi_aware 時: Ctrl=トグル追加, Shift=範囲, 普通のクリック=その行だけ
         戻り値: クリックした行のパス（なければ None）
         """
         row_id = self.tree.identify_row(event.y)
@@ -4001,16 +4703,9 @@ class EverythingSearchApp:
                 self.tree.selection_set(row_id)
             self.tree.focus(row_id)
         else:
-            # 既に複数選択中で、その中をクリック → 選択を維持（ドラッグ用）
-            if (
-                multi_aware
-                and row_id in self.tree.selection()
-                and len(self.tree.selection()) > 1
-            ):
-                self.tree.focus(row_id)
-            else:
-                self.tree.selection_set(row_id)
-                self.tree.focus(row_id)
+            # 普通のクリックはその行だけを選択（ドラッグ＆ドロップは廃止済みなので複数は維持しない）
+            self.tree.selection_set(row_id)
+            self.tree.focus(row_id)
 
         try:
             idx = self.tree.index(row_id)
@@ -4021,7 +4716,17 @@ class EverythingSearchApp:
         return None
 
     def _on_tree_b1_down(self, event):
+        # 行の上のクリックは選択をここで決め、Treeview 標準の処理は止める。
+        # 止めないと Ctrl+クリックで「ここで追加 → 標準処理で解除」と二重にトグルされ、
+        # Ctrl では複数選択できなかった（Shift は同じ範囲になるので偶然動いていた）。
+        # 見出し（並び替え）・列幅の境目など行以外は標準処理に任せる。
+        if self.tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+            return None
+        if not self.tree.identify_row(event.y):
+            return None
+        self.tree.focus_set()
         self._select_row_for_click(event, multi_aware=True)
+        return "break"
 
     def _on_tree_b3_down(self, event):
         """右クリック: 未選択行なら単一選択。既選択内なら複数選択を維持。"""

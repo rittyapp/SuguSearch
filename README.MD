@@ -12,6 +12,9 @@
 - 複数選択 → **コピー** でエクスプローラーへ貼り付け（Ctrl+V）
 - サイズ・更新日時の表示、列ヘッダでのソート（初期は更新日時の新しい順）
 - 対象フォルダの指定と履歴、Everything が別 PC のときの接続先設定
+- 取得・表示は新しい順に 500 件。取り切れていない／表示を打ち切ったときは件数バーが **赤い太字**
+- 接続設定は **接続して保存** の 1 ボタン。接続履歴に **接続できるか** と最終接続日時を表示
+- どこにもつながらないときは **LAN内のサーバーを探す** で同じネットワーク内の Everything を探せる
 
 ## 必要なもの
 
@@ -52,6 +55,7 @@ Everything 本体: https://www.voidtools.com/
 3. **リリース**: `script\release.bat`（ビルド → push → 公開 Release に exe と zip を添付。更新タブは exe を見に行く）
 4. 版数は `src\app_paths.py` の `APP_VERSION` と `version.txt` を揃える（配布物に version.txt は不要）
 5. **開発起動**: `script\起動.bat` または `py src\sugusearch.py`
+6. 版数のルール（パッチを +1 など）は `CLAUDE.md` の「バージョン番号のルール」
 
 ## かんたんな使い方
 
@@ -83,7 +87,7 @@ py -3 -m pip install pyinstaller pillow pywin32
 
 - `pywin32` はコピー機能に必要（`--hidden-import` だけでは足りず、本体の導入が要る）
 - PyInstaller の作業ファイルと自動生成される `すぐサーチ.spec` は `build\` にまとめています（ビルドの入力ではありません）
-- EXE は単体で配布できます。設定は EXE と同じフォルダの `settings.json` に作られるので、書き込みできる場所に置いてください
+- EXE は単体で配布できます。設定は、セットアップ済みなら `%LOCALAPPDATA%\SuguSearch\data\settings.json`、それ以外は EXE と同じフォルダの `settings.json` に作られます
 
 ## ドキュメント
 
@@ -106,7 +110,9 @@ py -3 -m pip install pyinstaller pillow pywin32
     build_icon.py                … 多サイズ アイコン生成
     起動.bat                     … Python から起動（開発用）
   src/
-    sugusearch.py     … 本体ソース
+    sugusearch.py                … 本体ソース
+    app_paths.py                 … 版数・配置先・設定ファイルの場所
+    self_update.py               … 「更新」タブの自己更新
     settings.json                … Python 実行時の設定（自動生成）
   assets/                        … sugusearch.ico と icons/（build_icon.py の生成物）
   doc/                           … ドキュメント一式
@@ -122,8 +128,8 @@ py -3 -m pip install pyinstaller pillow pywin32
 
 | 症状 | 確認すること |
 |------|--------------|
-| 検索に失敗する | Everything が起動しているか、HTTP サーバーが有効か、ホスト・ポートが合っているか（接続設定タブの **接続テスト**） |
+| 検索に失敗する | 件数バー（赤太字）の案内を見る。Everything が起動しているか、HTTP サーバーが有効か、ホスト・ポートが合っているか（接続設定タブの **接続して保存**／接続履歴の状態表示／**LAN内のサーバーを探す**） |
 | 0 件になる | 対象フォルダのパスが正しいか。空欄で全体検索して比較。種類チップが全部暗くなっていないか |
-| 期待する型番が出ない | 画面下の「変換後正規表現」を確認。`旧・OLD` や `重複` で除外されていないか |
+| 期待する型番が出ない | 画面下の「変換後正規表現」を確認。`旧・OLD` や `重複` で除外されていないか。件数バーが赤太字なら 500 件で打ち切られているので、対象フォルダなどで絞る |
 | 画面が開かない | Python の `tkinter` が使えるか（`py -3 -c "import tkinter"`） |
 | ビルドが失敗する | `pyinstaller` / `pillow` の導入、ウイルス対策ソフトによる EXE 生成のブロック |
