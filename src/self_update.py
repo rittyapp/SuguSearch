@@ -171,146 +171,38 @@ def prepare_staging_exe(asset_path: Path, staging_dir: Path) -> Path:
     raise RuntimeError(f"未対応の asset: {asset_path.name}")
 
 
-def write_update_runner(
-    install_root: Path,
-    *,
-    new_version: str,
-    wait_pid: int,
-) -> Path:
-    """
-    本体終了後に current↔previous を差し替え、新 EXE を起動する bat を書く。
-    経過は data\\update_runner.log に残す（差し替えが進まないときの調査用）。
-    """
-    ensure_install_dirs(install_root)
-    runner = install_root / "update_runner.bat"
-    staging_exe = install_root / "staging" / "SuguSearch.exe"
-    log = install_root / "data" / "update_runner.log"
-    # CP932-safe: ASCII only in bat body（パスに日本語が入る場合も cp932 で書く）
-    lines = [
-        "@echo off",
-        "chcp 932 >nul",
-        "setlocal",
-        f'cd /d "{install_root}"',
-        f'set "LOG={log}"',
-        f'echo [%date% %time%] start {new_version} wait pid {wait_pid}>> "%LOG%"',
-        f'powershell -NoProfile -Command "try {{ Wait-Process -Id {wait_pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}"',
-        "ping -n 2 127.0.0.1 >nul",
-        f'if not exist "{staging_exe}" (',
-        '  echo [%date% %time%] staging exe missing>> "%LOG%"',
-        "  goto launch",
-        ")",
-        "if exist previous\\SuguSearch.exe.bak del /f /q previous\\SuguSearch.exe.bak",
-        "if exist previous\\SuguSearch.exe move /y previous\\SuguSearch.exe previous\\SuguSearch.exe.bak >nul",
-        "set /a TRY=0",
-        ":mv",
-        "if not exist current\\SuguSearch.exe goto moved",
-        "move /y current\\SuguSearch.exe previous\\SuguSearch.exe >nul 2>&1",
-        "if not exist current\\SuguSearch.exe goto moved",
-        "set /a TRY+=1",
-        "if %TRY% GEQ 15 goto locked",
-        "ping -n 2 127.0.0.1 >nul",
-        "goto mv",
-        ":locked",
-        'echo [%date% %time%] current exe is still in use, update skipped>> "%LOG%"',
-        "if exist previous\\SuguSearch.exe.bak move /y previous\\SuguSearch.exe.bak previous\\SuguSearch.exe >nul",
-        "goto launch",
-        ":moved",
-        "if exist current\\version.txt move /y current\\version.txt previous\\version.txt >nul",
-        f'copy /y "{staging_exe}" "current\\SuguSearch.exe" >nul',
-        "if errorlevel 1 (",
-        '  echo [%date% %time%] copy failed, restoring previous>> "%LOG%"',
-        "  copy /y previous\\SuguSearch.exe current\\SuguSearch.exe >nul",
-        "  if exist previous\\version.txt copy /y previous\\version.txt current\\version.txt >nul",
-        "  goto launch",
-        ")",
-        f"echo {new_version}> current\\version.txt",
-        f'echo [%date% %time%] updated to {new_version}>> "%LOG%"',
-        ":launch",
-        'start "" "current\\SuguSearch.exe"',
-        "exit /b 0",
-    ]
-    text = "\r\n".join(lines) + "\r\n"
-    # Write as CP932 for cmd
+def _update_log(install_root: Path, msg: str) -> None:
+    """更新の経過を data\\update.log に追記（失敗しても止めない）。"""
     try:
-        runner.write_bytes(text.encode("cp932", errors="replace"))
-    except Exception:
-        runner.write_text(text, encoding="utf-8")
-    return runner
+        import time
 
-
-def _ps_quote(text: str) -> str:
-    return "'" + str(text).replace("'", "''") + "'"
-
-
-def launch_detached(runner: Path, cwd: Path) -> str:
-    """
-    差し替え bat をアプリから完全に切り離して起動する。
-    普通に子プロセスとして起動すると、アプリ（PyInstaller の EXE）の終了と一緒に
-    止められることがあり、1.0.4 までは差し替えが一度も実行されていなかった。
-    1) WMI（Win32_Process.Create）で起動 … 親がアプリではなくなる
-    2) だめならジョブから抜けて（CREATE_BREAKAWAY_FROM_JOB）起動
-    3) それもだめなら従来どおり
-    戻り値: 使った方法（ログ・表示用）
-    """
-    import subprocess
-
-    comspec = os.environ.get("COMSPEC", "cmd.exe")
-    if sys.platform != "win32":
-        subprocess.Popen([comspec, "/c", str(runner)], cwd=str(cwd), close_fds=True)
-        return "popen"
-
-    create_no_window = 0x08000000
-    detached = 0x00000008
-    new_group = 0x00000200
-    breakaway = 0x01000000
-    cmdline = f'"{comspec}" /c "{runner}"'
-    ps = (
-        "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
-        f"-Arguments @{{CommandLine={_ps_quote(cmdline)}; CurrentDirectory={_ps_quote(cwd)}}}; "
-        "exit [int]$r.ReturnValue"
-    )
-    try:
-        res = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            creationflags=create_no_window,
-            timeout=30,
-            capture_output=True,
-        )
-        if res.returncode == 0:
-            return "wmi"
+        log = install_root / "data" / "update.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except Exception:
         pass
-    try:
-        subprocess.Popen(
-            [comspec, "/c", str(runner)],
-            cwd=str(cwd),
-            creationflags=detached | new_group | breakaway,
-            close_fds=True,
+
+
+def apply_update_in_place(release: ReleaseInfo, token: str | None = None) -> Path:
+    """
+    ダウンロードして current\\SuguSearch.exe をその場で差し替える。戻り値は新しい EXE。
+
+    Windows では実行中の EXE でも「名前の変更（移動）」はできる（上書き・削除はできない）。
+    そこで、動いている自分の EXE を previous へ移動してから新しい EXE を current に置く。
+    1.0.5 までは「差し替え用 bat を起動してアプリを閉じる」方式だったが、実機で bat が
+    始まらないことがあったため廃止した（このやり方は 2026-10-21 に実機で確認済み）。
+    差し替えが済んでいれば、新しい版の起動に失敗してもショートカットからは新しい版が開く。
+    """
+    install_root = detect_install_root()
+    if install_root is None or not getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "セットアップ済みのアプリでのみ更新できます（配布の setup.bat で入れてください）"
         )
-        return "breakaway"
-    except OSError:
-        pass
-    subprocess.Popen(
-        [comspec, "/c", str(runner)],
-        cwd=str(cwd),
-        creationflags=detached | new_group,
-        close_fds=True,
-    )
-    return "popen"
-
-
-def apply_update_and_restart(
-    release: ReleaseInfo,
-    token: str | None = None,
-) -> str:
-    """
-    DL→staging→runner 起動→呼び出し元は終了すること。
-    戻り値: ユーザー向けメッセージ（成功準備完了）
-    """
-    install_root = detect_install_root() or local_app_install_root()
     ensure_install_dirs(install_root)
     staging = install_root / "staging"
-    # clear staging lightly
+    current = install_root / "current"
+    previous = install_root / "previous"
     for p in staging.glob("*"):
         try:
             if p.is_file():
@@ -318,28 +210,58 @@ def apply_update_and_restart(
         except OSError:
             pass
 
-    # ダウンロード先は展開後の SuguSearch.exe と名前がぶつからないようにする
+    _update_log(install_root, f"start {read_version()} -> {release.version} ({release.asset_name})")
     tmp = staging / f"download_{release.asset_name}"
     download_file(release.asset_url, tmp, token=token)
-    prepare_staging_exe(tmp, staging)
-    write_version_file(staging / "version.txt", release.version)
+    new_exe = prepare_staging_exe(tmp, staging)
+    _update_log(install_root, f"downloaded {new_exe.stat().st_size} bytes")
 
-    # Ensure current exists (first update from odd layout)
-    current = install_root / "current"
-    current.mkdir(parents=True, exist_ok=True)
-    if getattr(sys, "frozen", False):
-        cur_exe = Path(sys.executable).resolve()
-        dest = current / "SuguSearch.exe"
-        if cur_exe != dest and not dest.is_file():
-            try:
-                shutil.copy2(cur_exe, dest)
-            except OSError:
-                pass
-        if not (current / "version.txt").is_file():
-            write_version_file(current / "version.txt", read_version())
+    cur = current / "SuguSearch.exe"
+    prev = previous / "SuguSearch.exe"
+    # previous の古い EXE を片付ける（使用中なら別名に逃がす）
+    if prev.exists():
+        try:
+            prev.unlink()
+        except OSError:
+            import time
 
-    runner = write_update_runner(
-        install_root, new_version=release.version, wait_pid=os.getpid()
-    )
-    launch_detached(runner, install_root)
-    return f"版 {release.version} のダウンロード準備ができました。"
+            os.replace(prev, previous / f"SuguSearch.{int(time.time())}.old")
+    # 動いている EXE を previous へ（名前の変更なので実行中でもできる）
+    if cur.exists():
+        os.replace(cur, prev)
+    try:
+        shutil.copy2(new_exe, cur)
+    except Exception:
+        # 置けなかったら元に戻す
+        if prev.exists() and not cur.exists():
+            os.replace(prev, cur)
+        _update_log(install_root, "copy failed, restored previous")
+        raise
+    cur_ver = current / "version.txt"
+    if cur_ver.exists():
+        os.replace(cur_ver, previous / "version.txt")
+    write_version_file(cur_ver, release.version)
+    _update_log(install_root, f"replaced current with {release.version}")
+    return cur
+
+
+def launch_new_version(exe: Path) -> bool:
+    """差し替えた新しい EXE を起動する（アプリから切り離して）。"""
+    import subprocess
+
+    try:
+        flags = 0
+        if sys.platform == "win32":
+            flags = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
+        subprocess.Popen(
+            [str(exe)], cwd=str(exe.parent), creationflags=flags, close_fds=True
+        )
+        root = detect_install_root()
+        if root is not None:
+            _update_log(root, f"launched {exe}")
+        return True
+    except Exception as e:
+        root = detect_install_root()
+        if root is not None:
+            _update_log(root, f"launch failed: {e!r}")
+        return False

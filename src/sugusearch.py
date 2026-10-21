@@ -2726,14 +2726,14 @@ class EverythingSearchApp:
 
         btn_row = tk.Frame(card, bg=UI["surface"])
         btn_row.pack(fill="x", pady=(4, 8))
-        ModernButton(
-            btn_row, text="更新を確認", command=self.check_for_updates, variant="primary"
-        ).pack(side="left", padx=(0, 8))
+        # ボタンは 1 つ: 確認して、新しい版があれば「更新しますか？」→ 更新
         self.update_apply_btn = ModernButton(
-            btn_row, text="ダウンロードして更新", command=self.apply_pending_update
+            btn_row,
+            text="更新を確認して更新",
+            command=lambda: self.check_for_updates(silent=False),
+            variant="primary",
         )
         self.update_apply_btn.pack(side="left", padx=(0, 8))
-        self.update_apply_btn.set_enabled(False)
 
         tk.Label(
             card,
@@ -2794,6 +2794,7 @@ class EverythingSearchApp:
                 err = e
 
             def done():
+                self.update_apply_btn.set_enabled(True)
                 if err:
                     msg = (
                         "いま更新情報を確認できませんでした。\n"
@@ -2812,16 +2813,14 @@ class EverythingSearchApp:
                 self._set_update_notes(info.body or "（特に記載なし）")
                 if version_is_newer(info.version, local):
                     self._pending_release = info
-                    self.update_apply_btn.set_enabled(True)
                     self.update_status_var.set(
-                        "新しい版があります。「ダウンロードして更新」を押してください。"
+                        f"新しい版 {info.version} があります。「更新を確認して更新」を押すと更新できます。"
                     )
                     if not silent:
                         if messagebox.askyesno(
                             "更新版があります",
                             f"新しい版 {info.version} があります（いまの版 {local}）。\n\n"
-                            "ダウンロードして更新しますか？\n"
-                            "（あとで「更新」タブからも実行できます）",
+                            "更新しますか？",
                         ):
                             self.apply_pending_update()
                 else:
@@ -2842,17 +2841,15 @@ class EverythingSearchApp:
     def apply_pending_update(self):
         rel = self._pending_release
         if rel is None:
-            messagebox.showinfo("更新", "先に「更新を確認」を押してください。")
+            messagebox.showinfo("更新", "先に「更新を確認して更新」を押してください。")
             return
-        if detect_install_root() is None:
-            if not messagebox.askyesno(
-                "セットアップが必要",
-                "このPCにはまだインストール配置がありません。\n\n"
-                "配布されたセットアップを実行してから更新するのが安全です。\n"
-                "このままこのPC用フォルダへ入れて更新を試みますか？",
-            ):
-                return
-            ensure_install_dirs(local_app_install_root())
+        if detect_install_root() is None or not getattr(sys, "frozen", False):
+            messagebox.showinfo(
+                "更新",
+                "このアプリはセットアップされた場所で動いていないため、ここからは更新できません。\n"
+                "配布の SuguSearch-Setup-<版>.zip を展開して setup.bat を実行してください。",
+            )
+            return
 
         self.update_status_var.set("ダウンロード中…")
         self.update_apply_btn.set_enabled(False)
@@ -2860,10 +2857,12 @@ class EverythingSearchApp:
         def worker():
             err = None
             msg = ""
+            new_exe = None
             try:
-                from self_update import apply_update_and_restart
+                from self_update import apply_update_in_place
 
-                msg = apply_update_and_restart(rel)
+                new_exe = apply_update_in_place(rel)
+                msg = f"版 {rel.version} に更新しました。"
             except Exception as e:
                 err = e
 
@@ -2900,11 +2899,22 @@ class EverythingSearchApp:
                 self.update_status_var.set(msg)
                 messagebox.showinfo(
                     "更新",
-                    "ダウンロードが終わりました。\n\n"
-                    "OK を押すとアプリを一度終了し、新しい版に切り替わります。\n"
-                    "いつも使っているショートカットから起動できます。",
+                    f"版 {rel.version} に更新しました。\n\n"
+                    "OK を押すとアプリを閉じて、新しい版を起動します。\n"
+                    "起動しないときは、いつものショートカットから開いてください（新しい版で開きます）。",
                 )
-                self.root.destroy()
+                # 設定を保存してから新しい版を起動し、このウィンドウを閉じる
+                self._persist_chip_state()
+                try:
+                    from self_update import launch_new_version
+
+                    launch_new_version(new_exe)
+                except Exception:
+                    pass
+                try:
+                    self.root.destroy()
+                except tk.TclError:
+                    pass
 
             self.root.after(0, done)
 
